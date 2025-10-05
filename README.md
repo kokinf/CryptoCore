@@ -15,40 +15,23 @@
 ## Инструкции по сборке
 
 ### Требования
+- Git -[Установить Git](https://git-scm.com/downloads)
 - Go 1.25.1+ -[Установить Golang](https://go.dev/doc/install)
 
-### Сборка с помощью Makefile
+
+### Сборка проекта
 
 ```bash
 # Клонирование репозитория
 git clone https://github.com/kokinf/CryptoCore
 cd CryptoCore
 
-# Сборка для текущей платформы
+# Сборка для linux и macOS
 make build
 
-# Сборка для конкретной платформы
-make windows
-make linux
-make mac
+# Сборка для Windows
+go build -o cryptocore.exe ./src
 ```
-
-### Ручная сборка
-
-```bash
-# Текущая платформа
-go build -o cryptocore ./src
-
-# Windows
-GOOS=windows GOARCH=amd64 go build -o cryptocore.exe ./src
-
-# Linux
-GOOS=linux GOARCH=amd64 go build -o cryptocore ./src
-
-# macOS
-GOOS=darwin GOARCH=amd64 go build -o cryptocore ./src
-```
-
 ## Зависимости
 
 - **Go 1.21+** - язык программирования и среда выполнения
@@ -124,9 +107,6 @@ echo "всем привет!!" > secret.txt
 ./cryptocore --algorithm aes --mode ecb --decrypt \
   --key 000102030405060708090a0b0c0d0e0f \
   --input secret.enc --output secret_decrypted.txt
-
-# Проверка результата
-diff secret.txt secret_decrypted.txt
 ```
 
 ### Пример 2: Автоматические имена файлов
