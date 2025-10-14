@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -18,22 +19,26 @@ type Config struct {
 	KeyStr     string
 	InputFile  string
 	OutputFile string
+	IV         []byte
+	IVStr      string
 }
 
 func ParseCLI(args []string) (*Config, error) {
 	var config Config
 
 	flagSet := flag.NewFlagSet("cryptocore", flag.ContinueOnError)
-	flagSet.StringVar(&config.Algorithm, "algorithm", "", "Cipher algorithm (aes)")
-	flagSet.StringVar(&config.Mode, "mode", "", "Mode of operation (ecb)")
-	flagSet.BoolVar(&config.Encrypt, "encrypt", false, "Perform encryption")
-	flagSet.BoolVar(&config.Decrypt, "decrypt", false, "Perform decryption")
-	flagSet.StringVar(&config.KeyStr, "key", "", "Encryption key as hexadecimal string")
-	flagSet.StringVar(&config.InputFile, "input", "", "Input file path")
-	flagSet.StringVar(&config.OutputFile, "output", "", "Output file path")
+
+	flagSet.StringVar(&config.Algorithm, "algorithm", "", "Алгоритм шифрования (aes)")
+	flagSet.StringVar(&config.Mode, "mode", "", "Режим работы (ecb, cbc, cfb, ofb, ctr)")
+	flagSet.BoolVar(&config.Encrypt, "encrypt", false, "Выполнить шифрование")
+	flagSet.BoolVar(&config.Decrypt, "decrypt", false, "Выполнить дешифрование")
+	flagSet.StringVar(&config.KeyStr, "key", "", "Ключ шифрования в hex-формате")
+	flagSet.StringVar(&config.InputFile, "input", "", "Путь к входному файлу")
+	flagSet.StringVar(&config.OutputFile, "output", "", "Путь к выходному файлу")
+	flagSet.StringVar(&config.IVStr, "iv", "", "Вектор инициализации в hex-формате (только для дешифрования)")
 
 	if err := flagSet.Parse(args); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("ошибка парсинга аргументов: %v", err)
 	}
 
 	if err := validateConfig(&config); err != nil {
@@ -41,7 +46,11 @@ func ParseCLI(args []string) (*Config, error) {
 	}
 
 	if config.OutputFile == "" {
-		config.OutputFile = deriveOutputFilename(config.InputFile, config.Encrypt)
+		config.OutputFile = deriveOutputFilename(config.InputFile, config.Encrypt, config.Mode)
+	}
+
+	if err := validateIVLogic(&config); err != nil {
+		return nil, err
 	}
 
 	return &config, nil
@@ -49,58 +58,114 @@ func ParseCLI(args []string) (*Config, error) {
 
 func validateConfig(config *Config) error {
 	if config.Algorithm == "" {
-		return errors.New("--algorithm argument is required")
+		return errors.New("аргумент --algorithm обязателен")
 	}
 	if config.Algorithm != "aes" {
-		return fmt.Errorf("unsupported algorithm: %s (only 'aes' is supported)", config.Algorithm)
+		return fmt.Errorf("неподдерживаемый алгоритм: %s (поддерживается только 'aes')", config.Algorithm)
 	}
 
 	if config.Mode == "" {
-		return errors.New("--mode argument is required")
+		return errors.New("аргумент --mode обязателен")
 	}
-	if config.Mode != "ecb" {
-		return fmt.Errorf("unsupported mode: %s (only 'ecb' is supported)", config.Mode)
+
+	supportedModes := map[string]bool{
+		"ecb": true,
+		"cbc": true,
+		"cfb": true,
+		"ofb": true,
+		"ctr": true,
+	}
+	if !supportedModes[config.Mode] {
+		return fmt.Errorf("неподдерживаемый режим: %s (поддерживаются: ecb, cbc, cfb, ofb, ctr)", config.Mode)
 	}
 
 	if config.Encrypt && config.Decrypt {
-		return errors.New("cannot specify both --encrypt and --decrypt")
+		return errors.New("нельзя указывать одновременно --encrypt и --decrypt")
 	}
 	if !config.Encrypt && !config.Decrypt {
-		return errors.New("must specify either --encrypt or --decrypt")
+		return errors.New("необходимо указать либо --encrypt, либо --decrypt")
 	}
 
 	if config.KeyStr == "" {
-		return errors.New("--key argument is required")
+		return errors.New("аргумент --key обязателен")
 	}
 	key, err := hex.DecodeString(config.KeyStr)
 	if err != nil {
-		return fmt.Errorf("invalid key format: %v (must be hexadecimal string)", err)
+		return fmt.Errorf("некорректный формат ключа: %v (должен быть hex-строка)", err)
 	}
 	if len(key) != 16 {
-		return fmt.Errorf("invalid key length: %d bytes (must be 16 bytes for AES-128)", len(key))
+		return fmt.Errorf("некорректная длина ключа: %d байт (должно быть 16 байт для AES-128)", len(key))
 	}
 	config.Key = key
 
 	if config.InputFile == "" {
-		return errors.New("--input argument is required")
+		return errors.New("аргумент --input обязателен")
+	}
+	if _, err := os.Stat(config.InputFile); os.IsNotExist(err) {
+		return fmt.Errorf("входной файл не существует: %s", config.InputFile)
 	}
 
 	return nil
 }
 
-func deriveOutputFilename(inputFile string, encrypt bool) string {
+// validateIVLogic проверка логики работы с IV
+func validateIVLogic(config *Config) error {
+	if config.Encrypt {
+		if config.IVStr != "" {
+			fmt.Fprintf(os.Stderr, "Предупреждение: --iv игнорируется при шифровании (IV генерируется автоматически)\n")
+		}
+	} else if config.Decrypt {
+		if config.Mode == "ecb" {
+			if config.IVStr != "" {
+				fmt.Fprintf(os.Stderr, "Предупреждение: --iv игнорируется для режима ECB\n")
+			}
+		} else {
+			if config.IVStr == "" {
+				fmt.Fprintf(os.Stderr, "IV не указан, будет прочитан из начала файла %s\n", config.InputFile)
+			} else {
+				iv, err := hex.DecodeString(config.IVStr)
+				if err != nil {
+					return fmt.Errorf("некорректный формат IV: %v (должен быть hex-строка)", err)
+				}
+
+				if len(iv) != 16 {
+					return fmt.Errorf("некорректная длина IV: %d байт (должно быть 16 байт)", len(iv))
+				}
+
+				config.IV = iv
+				fmt.Fprintf(os.Stderr, "Используется указанный IV\n")
+			}
+		}
+	}
+
+	return nil
+}
+
+// deriveOutputFilename автоматическая генерация выходного файла, если он не указан
+func deriveOutputFilename(inputFile string, encrypt bool, mode string) string {
 	base := filepath.Base(inputFile)
 	ext := filepath.Ext(inputFile)
 	name := strings.TrimSuffix(base, ext)
 
 	if encrypt {
-		return name + ext + ".enc"
+		if mode != "ecb" {
+			return fmt.Sprintf("%s_%s.enc", name, mode)
+		}
+		return name + ".enc"
 	} else {
 		if strings.HasSuffix(base, ".enc") {
 			base = strings.TrimSuffix(base, ".enc")
 			ext = filepath.Ext(base)
 			name = strings.TrimSuffix(base, ext)
+
+			if strings.HasSuffix(name, "_ecb") || strings.HasSuffix(name, "_cbc") || strings.HasSuffix(name, "_cfb") || strings.HasSuffix(name, "_ofb") ||
+				strings.HasSuffix(name, "_ctr") {
+				name = strings.TrimSuffix(name, "_"+mode)
+			}
+
+			return name + ".dec" + ext
+		} else {
+			return name + ".dec" + ext
 		}
-		return name + ".dec" + ext
 	}
 }

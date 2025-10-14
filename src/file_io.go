@@ -1,7 +1,7 @@
 package main
 
 import (
-	ecb "cryptocore/src/modes"
+	"cryptocore/src/modes"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -14,34 +14,182 @@ type FileIOError struct {
 }
 
 func (e *FileIOError) Error() string {
-	return fmt.Sprintf("file I/O error during %s on '%s': %v", e.Operation, e.Path, e.Err)
+	return fmt.Sprintf("ошибка ввода-вывода при %s файла '%s': %v", e.Operation, e.Path, e.Err)
 }
 
+// ExecuteCryptoOperation выполняет операцию шифрования или дешифрования
 func ExecuteCryptoOperation(config *Config) error {
-	inputData, err := ReadInputFile(config.InputFile)
+	if config.Encrypt {
+		return executeEncryption(config)
+	} else {
+		return executeDecryption(config)
+	}
+}
+
+func executeEncryption(config *Config) error {
+	plaintext, err := ReadInputFile(config.InputFile)
 	if err != nil {
 		return err
 	}
 
-	var outputData []byte
+	var ciphertext []byte
+	var iv []byte
 
-	if config.Encrypt {
-		outputData, err = ecb.ECBEncrypt(inputData, config.Key)
+	// Шифрование
+	switch config.Mode {
+	case "ecb":
+		ciphertext, err = modes.ECBEncrypt(plaintext, config.Key)
 		if err != nil {
-			return fmt.Errorf("encryption failed: %v", err)
+			return fmt.Errorf("ошибка шифрования ECB: %v", err)
 		}
-	} else {
-		outputData, err = ecb.ECBDecrypt(inputData, config.Key)
+
+	case "cbc":
+		ciphertext, iv, err = modes.CBCEncrypt(plaintext, config.Key)
 		if err != nil {
-			return fmt.Errorf("decryption failed: %v", err)
+			return fmt.Errorf("ошибка шифрования CBC: %v", err)
 		}
+
+	case "cfb":
+		ciphertext, iv, err = modes.CFBEncrypt(plaintext, config.Key)
+		if err != nil {
+			return fmt.Errorf("ошибка шифрования CFB: %v", err)
+		}
+
+	case "ofb":
+		ciphertext, iv, err = modes.OFBEncrypt(plaintext, config.Key)
+		if err != nil {
+			return fmt.Errorf("ошибка шифрования OFB: %v", err)
+		}
+
+	case "ctr":
+		ciphertext, iv, err = modes.CTREncrypt(plaintext, config.Key)
+		if err != nil {
+			return fmt.Errorf("ошибка шифрования CTR: %v", err)
+		}
+
+	default:
+		return fmt.Errorf("неподдерживаемый режим: %s", config.Mode)
 	}
 
-	if err := WriteOutputFile(config.OutputFile, outputData); err != nil {
+	if err := writeEncryptionOutput(config, ciphertext, iv); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+func executeDecryption(config *Config) error {
+	var ciphertext []byte
+	var iv []byte
+	var err error
+
+	if config.Mode == "ecb" {
+		ciphertext, err = ReadInputFile(config.InputFile)
+		if err != nil {
+			return err
+		}
+		iv = nil
+	} else {
+		if config.IV != nil {
+			ciphertext, err = ReadInputFile(config.InputFile)
+			if err != nil {
+				return err
+			}
+			iv = config.IV
+		} else {
+			ciphertext, iv, err = ReadEncryptedFileWithIV(config.InputFile)
+			if err != nil {
+				return err
+			}
+		}
+	}
+
+	var plaintext []byte
+
+	// Дешифрования
+	switch config.Mode {
+	case "ecb":
+		plaintext, err = modes.ECBDecrypt(ciphertext, config.Key)
+		if err != nil {
+			return fmt.Errorf("ошибка дешифрования ECB: %v", err)
+		}
+
+	case "cbc":
+		if len(iv) != 16 {
+			return fmt.Errorf("некорректная длина IV: %d байт (должно быть 16 байт)", len(iv))
+		}
+		plaintext, err = modes.CBCDecrypt(ciphertext, config.Key, iv)
+		if err != nil {
+			return fmt.Errorf("ошибка дешифрования CBC: %v", err)
+		}
+
+	case "cfb":
+		if len(iv) != 16 {
+			return fmt.Errorf("некорректная длина IV: %d байт (должно быть 16 байт)", len(iv))
+		}
+		plaintext, err = modes.CFBDecrypt(ciphertext, config.Key, iv)
+		if err != nil {
+			return fmt.Errorf("ошибка дешифрования CFB: %v", err)
+		}
+
+	case "ofb":
+		if len(iv) != 16 {
+			return fmt.Errorf("некорректная длина IV: %d байт (должно быть 16 байт)", len(iv))
+		}
+		plaintext, err = modes.OFBDecrypt(ciphertext, config.Key, iv)
+		if err != nil {
+			return fmt.Errorf("ошибка дешифрования OFB: %v", err)
+		}
+
+	case "ctr":
+		if len(iv) != 16 {
+			return fmt.Errorf("некорректная длина IV: %d байт (должно быть 16 байт)", len(iv))
+		}
+		plaintext, err = modes.CTRDecrypt(ciphertext, config.Key, iv)
+		if err != nil {
+			return fmt.Errorf("ошибка дешифрования CTR: %v", err)
+		}
+
+	default:
+		return fmt.Errorf("неподдерживаемый режим: %s", config.Mode)
+	}
+
+	if err := WriteOutputFile(config.OutputFile, plaintext); err != nil {
+		return err
+	}
+
+	return nil
+}
+
+func writeEncryptionOutput(config *Config, ciphertext []byte, iv []byte) error {
+	if config.Mode == "ecb" {
+		return WriteOutputFile(config.OutputFile, ciphertext)
+	} else {
+		finalOutput := make([]byte, len(iv)+len(ciphertext))
+		copy(finalOutput[:16], iv)
+		copy(finalOutput[16:], ciphertext)
+		return WriteOutputFile(config.OutputFile, finalOutput)
+	}
+}
+
+func ReadEncryptedFileWithIV(filePath string) ([]byte, []byte, error) {
+	data, err := ReadInputFile(filePath)
+	if err != nil {
+		return nil, nil, err
+	}
+
+	if len(data) < 16 {
+		return nil, nil, &FileIOError{
+			Operation: "чтение",
+			Path:      filePath,
+			Err:       fmt.Errorf("файл слишком короткий для извлечения IV (требуется минимум 16 байт, получено %d байт)", len(data)),
+		}
+	}
+
+	iv := data[:16]
+	ciphertext := data[16:]
+
+	return ciphertext, iv, nil
 }
 
 func ReadInputFile(inputPath string) ([]byte, error) {
@@ -49,13 +197,13 @@ func ReadInputFile(inputPath string) ([]byte, error) {
 	if err != nil {
 		if os.IsNotExist(err) {
 			return nil, &FileIOError{
-				Operation: "check existence",
+				Operation: "проверка существования",
 				Path:      inputPath,
-				Err:       fmt.Errorf("file does not exist"),
+				Err:       fmt.Errorf("файл не существует"),
 			}
 		}
 		return nil, &FileIOError{
-			Operation: "access",
+			Operation: "доступ",
 			Path:      inputPath,
 			Err:       err,
 		}
@@ -63,46 +211,25 @@ func ReadInputFile(inputPath string) ([]byte, error) {
 
 	if fileInfo.IsDir() {
 		return nil, &FileIOError{
-			Operation: "read",
+			Operation: "чтение",
 			Path:      inputPath,
-			Err:       fmt.Errorf("is a directory, not a file"),
-		}
-	}
-
-	file, err := os.Open(inputPath)
-	if err != nil {
-		return nil, &FileIOError{
-			Operation: "open for reading",
-			Path:      inputPath,
-			Err:       err,
-		}
-	}
-	defer file.Close()
-
-	if fileInfo.Mode().Perm()&0400 == 0 {
-		return nil, &FileIOError{
-			Operation: "read",
-			Path:      inputPath,
-			Err:       fmt.Errorf("insufficient read permissions"),
+			Err:       fmt.Errorf("это директория, а не файл"),
 		}
 	}
 
 	data, err := os.ReadFile(inputPath)
 	if err != nil {
 		return nil, &FileIOError{
-			Operation: "read content",
+			Operation: "чтение содержимого",
 			Path:      inputPath,
 			Err:       err,
 		}
 	}
 
-	if len(data) == 0 {
-		fmt.Fprintf(os.Stderr, "Warning: Input file '%s' is empty\n", inputPath)
-	}
-
 	return data, nil
 }
 
+// WriteOutputFile записывает данные в выходной файл с обработкой ошибок
 func WriteOutputFile(outputPath string, data []byte) error {
 	outputDir := filepath.Dir(outputPath)
 	if outputDir != "." && outputDir != "" {
@@ -110,13 +237,13 @@ func WriteOutputFile(outputPath string, data []byte) error {
 		if err != nil {
 			if os.IsNotExist(err) {
 				return &FileIOError{
-					Operation: "write",
+					Operation: "запись",
 					Path:      outputPath,
-					Err:       fmt.Errorf("output directory does not exist: %s", outputDir),
+					Err:       fmt.Errorf("директория не существует: %s", outputDir),
 				}
 			}
 			return &FileIOError{
-				Operation: "access output directory",
+				Operation: "доступ к директории",
 				Path:      outputDir,
 				Err:       err,
 			}
@@ -124,85 +251,20 @@ func WriteOutputFile(outputPath string, data []byte) error {
 
 		if !dirInfo.IsDir() {
 			return &FileIOError{
-				Operation: "write",
+				Operation: "запись",
 				Path:      outputPath,
-				Err:       fmt.Errorf("output path contains a file where directory should be: %s", outputDir),
+				Err:       fmt.Errorf("путь содержит файл вместо директории: %s", outputDir),
 			}
 		}
-
-		tempFile, err := os.CreateTemp(outputDir, ".cryptocore_write_test_")
-		if err != nil {
-			return &FileIOError{
-				Operation: "write",
-				Path:      outputPath,
-				Err:       fmt.Errorf("output directory is not writable: %s", outputDir),
-			}
-		}
-		tempFile.Close()
-		os.Remove(tempFile.Name())
-	}
-
-	if _, err := os.Stat(outputPath); err == nil {
-		file, err := os.OpenFile(outputPath, os.O_WRONLY, 0644)
-		if err != nil {
-			return &FileIOError{
-				Operation: "write",
-				Path:      outputPath,
-				Err:       fmt.Errorf("output file exists but is not writable"),
-			}
-		}
-		file.Close()
-
-		fmt.Fprintf(os.Stderr, "Warning: Output file '%s' already exists and will be overwritten\n", outputPath)
 	}
 
 	if err := os.WriteFile(outputPath, data, 0644); err != nil {
 		return &FileIOError{
-			Operation: "write content",
+			Operation: "запись содержимого",
 			Path:      outputPath,
 			Err:       err,
 		}
 	}
 
-	if err := verifyFileWrite(outputPath, data); err != nil {
-		os.Remove(outputPath)
-		return &FileIOError{
-			Operation: "verify write",
-			Path:      outputPath,
-			Err:       fmt.Errorf("file write verification failed: %v", err),
-		}
-	}
-
-	return nil
-}
-
-func verifyFileWrite(filePath string, originalData []byte) error {
-	writtenData, err := os.ReadFile(filePath)
-	if err != nil {
-		return err
-	}
-
-	if len(writtenData) != len(originalData) {
-		return fmt.Errorf("size mismatch: wrote %d bytes but file contains %d bytes",
-			len(originalData), len(writtenData))
-	}
-
-	for i := range originalData {
-		if writtenData[i] != originalData[i] {
-			return fmt.Errorf("data corruption detected at byte %d", i)
-		}
-	}
-
-	return nil
-}
-
-func SafeFileOperation(operation func() error, operationName, filePath string) error {
-	if err := operation(); err != nil {
-		return &FileIOError{
-			Operation: operationName,
-			Path:      filePath,
-			Err:       err,
-		}
-	}
 	return nil
 }
