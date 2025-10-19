@@ -3,6 +3,7 @@ package modes
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"errors"
 )
 
 type ofb struct {
@@ -45,15 +46,14 @@ func (x *ofb) XORKeyStream(dst, src []byte) {
 	}
 }
 
-func OFBEncrypt(plaintext, key []byte) ([]byte, []byte, error) {
+func OFBEncryptWithIV(plaintext, key, iv []byte) ([]byte, error) {
 	block, err := CreateCipherBlock(key)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	iv, err := GenerateRandomIV()
-	if err != nil {
-		return nil, nil, err
+	if len(iv) != aes.BlockSize {
+		return nil, errors.New("некорректная длина IV")
 	}
 
 	ciphertext := make([]byte, len(plaintext))
@@ -61,13 +61,17 @@ func OFBEncrypt(plaintext, key []byte) ([]byte, []byte, error) {
 	stream := newOFB(block, iv)
 	stream.XORKeyStream(ciphertext, plaintext)
 
-	return ciphertext, iv, nil
+	return ciphertext, nil
 }
 
 func OFBDecrypt(ciphertext, key, iv []byte) ([]byte, error) {
 	block, err := CreateCipherBlock(key)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(iv) != aes.BlockSize {
+		return nil, errors.New("некорректная длина IV")
 	}
 
 	plaintext := make([]byte, len(ciphertext))

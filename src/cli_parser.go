@@ -32,7 +32,7 @@ func ParseCLI(args []string) (*Config, error) {
 	flagSet.StringVar(&config.Mode, "mode", "", "Режим работы (ecb, cbc, cfb, ofb, ctr)")
 	flagSet.BoolVar(&config.Encrypt, "encrypt", false, "Выполнить шифрование")
 	flagSet.BoolVar(&config.Decrypt, "decrypt", false, "Выполнить дешифрование")
-	flagSet.StringVar(&config.KeyStr, "key", "", "Ключ шифрования в hex-формате")
+	flagSet.StringVar(&config.KeyStr, "key", "", "Ключ шифрования в hex-формате (опционально для шифрования)")
 	flagSet.StringVar(&config.InputFile, "input", "", "Путь к входному файлу")
 	flagSet.StringVar(&config.OutputFile, "output", "", "Путь к выходному файлу")
 	flagSet.StringVar(&config.IVStr, "iv", "", "Вектор инициализации в hex-формате (только для дешифрования)")
@@ -87,16 +87,24 @@ func validateConfig(config *Config) error {
 	}
 
 	if config.KeyStr == "" {
-		return errors.New("аргумент --key обязателен")
+		if config.Decrypt {
+			return errors.New("аргумент --key обязателен для дешифрования")
+		}
+		fmt.Fprintf(os.Stderr, "Ключ не указан, будет сгенерирован автоматически\n")
+	} else {
+		key, err := hex.DecodeString(config.KeyStr)
+		if err != nil {
+			return fmt.Errorf("некорректный формат ключа: %v (должен быть hex-строка)", err)
+		}
+		if len(key) != 16 {
+			return fmt.Errorf("некорректная длина ключа: %d байт (должно быть 16 байт для AES-128)", len(key))
+		}
+		config.Key = key
+
+		if isWeakKey(key) {
+			fmt.Fprintf(os.Stderr, "Предупреждение: обнаружен потенциально слабый ключ\n")
+		}
 	}
-	key, err := hex.DecodeString(config.KeyStr)
-	if err != nil {
-		return fmt.Errorf("некорректный формат ключа: %v (должен быть hex-строка)", err)
-	}
-	if len(key) != 16 {
-		return fmt.Errorf("некорректная длина ключа: %d байт (должно быть 16 байт для AES-128)", len(key))
-	}
-	config.Key = key
 
 	if config.InputFile == "" {
 		return errors.New("аргумент --input обязателен")
@@ -108,7 +116,94 @@ func validateConfig(config *Config) error {
 	return nil
 }
 
-// validateIVLogic проверка логики работы с IV
+func isWeakKey(key []byte) bool {
+	if len(key) == 0 {
+		return false
+	}
+
+	allZero := true
+	for _, b := range key {
+		if b != 0 {
+			allZero = false
+			break
+		}
+	}
+	if allZero {
+		return true
+	}
+
+	sequentialUp := true
+	for i := 1; i < len(key); i++ {
+		if key[i] != key[i-1]+1 {
+			sequentialUp = false
+			break
+		}
+	}
+	if sequentialUp {
+		return true
+	}
+
+	sequentialDown := true
+	for i := 1; i < len(key); i++ {
+		if key[i] != key[i-1]-1 {
+			sequentialDown = false
+			break
+		}
+	}
+	if sequentialDown {
+		return true
+	}
+
+	allSame := true
+	first := key[0]
+	for _, b := range key {
+		if b != first {
+			allSame = false
+			break
+		}
+	}
+	if allSame {
+		return true
+	}
+
+	if hasRepeatingPattern(key) {
+		return true
+	}
+
+	return false
+}
+
+func hasRepeatingPattern(key []byte) bool {
+	if len(key) < 4 {
+		return false
+	}
+
+	for patternLen := 2; patternLen <= len(key)/2; patternLen *= 2 {
+		if len(key)%patternLen != 0 {
+			continue
+		}
+
+		isRepeating := true
+		pattern := key[:patternLen]
+		for i := patternLen; i < len(key); i += patternLen {
+			for j := 0; j < patternLen; j++ {
+				if key[i+j] != pattern[j] {
+					isRepeating = false
+					break
+				}
+			}
+			if !isRepeating {
+				break
+			}
+		}
+		if isRepeating {
+			return true
+		}
+	}
+
+	return false
+}
+
 func validateIVLogic(config *Config) error {
 	if config.Encrypt {
 		if config.IVStr != "" {

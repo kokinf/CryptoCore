@@ -3,18 +3,8 @@ package modes
 import (
 	"crypto/aes"
 	"crypto/cipher"
-	"crypto/rand"
 	"errors"
-	"io"
 )
-
-func GenerateRandomIV() ([]byte, error) {
-	iv := make([]byte, aes.BlockSize)
-	if _, err := io.ReadFull(rand.Reader, iv); err != nil {
-		return nil, errors.New("не удалось сгенерировать случайный IV")
-	}
-	return iv, nil
-}
 
 func CreateCipherBlock(key []byte) (cipher.Block, error) {
 	return aes.NewCipher(key)

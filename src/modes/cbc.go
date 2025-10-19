@@ -84,15 +84,14 @@ func (x *cbcDecrypter) CryptBlocks(dst, src []byte) {
 	}
 }
 
-func CBCEncrypt(plaintext, key []byte) ([]byte, []byte, error) {
+func CBCEncryptWithIV(plaintext, key, iv []byte) ([]byte, error) {
 	block, err := CreateCipherBlock(key)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	iv, err := GenerateRandomIV()
-	if err != nil {
-		return nil, nil, err
+	if len(iv) != block.BlockSize() {
+		return nil, errors.New("некорректная длина IV")
 	}
 
 	paddedPlaintext := PKCS7Pad(plaintext, block.BlockSize())
@@ -102,7 +101,7 @@ func CBCEncrypt(plaintext, key []byte) ([]byte, []byte, error) {
 	mode := newCBCEncrypter(block, iv)
 	mode.CryptBlocks(ciphertext, paddedPlaintext)
 
-	return ciphertext, iv, nil
+	return ciphertext, nil
 }
 
 func CBCDecrypt(ciphertext, key, iv []byte) ([]byte, error) {

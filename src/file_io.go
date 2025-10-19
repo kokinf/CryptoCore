@@ -2,6 +2,7 @@ package main
 
 import (
 	"cryptocore/src/modes"
+	"encoding/hex"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -26,7 +27,21 @@ func ExecuteCryptoOperation(config *Config) error {
 	}
 }
 
+func generateRandomIV() ([]byte, error) {
+	return GenerateRandomBytes(16)
+}
+
 func executeEncryption(config *Config) error {
+	if config.Key == nil {
+		generatedKey, err := GenerateRandomBytes(16)
+		if err != nil {
+			return fmt.Errorf("ошибка генерации ключа: %v", err)
+		}
+		config.Key = generatedKey
+
+		fmt.Printf("Сгенерированный ключ: %s\n", hex.EncodeToString(config.Key))
+	}
+
 	plaintext, err := ReadInputFile(config.InputFile)
 	if err != nil {
 		return err
@@ -44,25 +59,41 @@ func executeEncryption(config *Config) error {
 		}
 
 	case "cbc":
-		ciphertext, iv, err = modes.CBCEncrypt(plaintext, config.Key)
+		iv, err = generateRandomIV()
+		if err != nil {
+			return fmt.Errorf("ошибка генерации IV для CBC: %v", err)
+		}
+		ciphertext, err = modes.CBCEncryptWithIV(plaintext, config.Key, iv)
 		if err != nil {
 			return fmt.Errorf("ошибка шифрования CBC: %v", err)
 		}
 
 	case "cfb":
-		ciphertext, iv, err = modes.CFBEncrypt(plaintext, config.Key)
+		iv, err = generateRandomIV()
+		if err != nil {
+			return fmt.Errorf("ошибка генерации IV для CFB: %v", err)
+		}
+		ciphertext, err = modes.CFBEncryptWithIV(plaintext, config.Key, iv)
 		if err != nil {
 			return fmt.Errorf("ошибка шифрования CFB: %v", err)
 		}
 
 	case "ofb":
-		ciphertext, iv, err = modes.OFBEncrypt(plaintext, config.Key)
+		iv, err = generateRandomIV()
+		if err != nil {
+			return fmt.Errorf("ошибка генерации IV для OFB: %v", err)
+		}
+		ciphertext, err = modes.OFBEncryptWithIV(plaintext, config.Key, iv)
 		if err != nil {
 			return fmt.Errorf("ошибка шифрования OFB: %v", err)
 		}
 
 	case "ctr":
-		ciphertext, iv, err = modes.CTREncrypt(plaintext, config.Key)
+		iv, err = generateRandomIV()
+		if err != nil {
+			return fmt.Errorf("ошибка генерации IV для CTR: %v", err)
+		}
+		ciphertext, err = modes.CTREncryptWithIV(plaintext, config.Key, iv)
 		if err != nil {
 			return fmt.Errorf("ошибка шифрования CTR: %v", err)
 		}

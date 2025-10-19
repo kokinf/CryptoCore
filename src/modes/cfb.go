@@ -3,17 +3,17 @@ package modes
 import (
 	"crypto/aes"
 	"crypto/cipher"
+	"errors"
 )
 
-func CFBEncrypt(plaintext, key []byte) ([]byte, []byte, error) {
+func CFBEncryptWithIV(plaintext, key, iv []byte) ([]byte, error) {
 	block, err := CreateCipherBlock(key)
 	if err != nil {
-		return nil, nil, err
+		return nil, err
 	}
 
-	iv, err := GenerateRandomIV()
-	if err != nil {
-		return nil, nil, err
+	if len(iv) != aes.BlockSize {
+		return nil, errors.New("некорректная длина IV")
 	}
 
 	ciphertext := make([]byte, len(plaintext))
@@ -28,13 +28,17 @@ func CFBEncrypt(plaintext, key []byte) ([]byte, []byte, error) {
 
 	encrypter.XORKeyStream(ciphertext, plaintext)
 
-	return ciphertext, iv, nil
+	return ciphertext, nil
 }
 
 func CFBDecrypt(ciphertext, key, iv []byte) ([]byte, error) {
 	block, err := CreateCipherBlock(key)
 	if err != nil {
 		return nil, err
+	}
+
+	if len(iv) != aes.BlockSize {
+		return nil, errors.New("некорректная длина IV")
 	}
 
 	plaintext := make([]byte, len(ciphertext))
