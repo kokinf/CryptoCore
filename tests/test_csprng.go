@@ -220,7 +220,7 @@ func testVariousSizes() error {
 
 // Тестирует генерацию векторов инициализации (IV)
 func testIVGeneration() error {
-	fmt.Println("\n=== ТЕСТ 5: Генерация векторов инициализации (IV) ===")
+	fmt.Println("\nТЕСТ 5: Генерация векторов инициализации (IV)")
 
 	numIVs := 100
 	ivSize := 16

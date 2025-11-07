@@ -1,6 +1,6 @@
 # Конфигурация проекта
 PROJECT_NAME = cryptocore
-VERSION = 1.0.0
+VERSION = 4.0.0
 BUILD_DIR = build
 SRC_DIR = src
 

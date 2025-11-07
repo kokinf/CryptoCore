@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cryptocore/src/hash"
 	"encoding/hex"
 	"errors"
 	"flag"
@@ -11,20 +12,70 @@ import (
 )
 
 type Config struct {
-	Algorithm  string
-	Mode       string
-	Encrypt    bool
-	Decrypt    bool
-	Key        []byte
-	KeyStr     string
-	InputFile  string
-	OutputFile string
-	IV         []byte
-	IVStr      string
+	Algorithm     string
+	Mode          string
+	Encrypt       bool
+	Decrypt       bool
+	Key           []byte
+	KeyStr        string
+	InputFile     string
+	OutputFile    string
+	IV            []byte
+	IVStr         string
+	Command       string // encrypt, decrypt, или dgst
+	HashAlgorithm hash.HashAlgorithm
 }
 
 func ParseCLI(args []string) (*Config, error) {
+	if len(args) == 0 {
+		return nil, errors.New("не указаны аргументы. Используйте --help для справки")
+	}
+
+	var command string
+	var remainingArgs []string
+
+	if args[0] == "dgst" {
+		command = "dgst"
+		remainingArgs = args[1:]
+	} else if strings.HasPrefix(args[0], "-") {
+		command = "encrypt"
+		remainingArgs = args
+	} else {
+		return nil, fmt.Errorf("неизвестная подкоманда: %s. Поддерживаются: dgst", args[0])
+	}
+
+	if command == "dgst" {
+		return parseDgstCommand(remainingArgs)
+	} else {
+		return parseCryptoCommand(remainingArgs)
+	}
+}
+
+func parseDgstCommand(args []string) (*Config, error) {
 	var config Config
+	config.Command = "dgst"
+
+	flagSet := flag.NewFlagSet("cryptocore dgst", flag.ContinueOnError)
+
+	var algorithmStr string
+	flagSet.StringVar(&algorithmStr, "algorithm", "", "Алгоритм хеширования (sha256, sha3-256)")
+	flagSet.StringVar(&config.InputFile, "input", "", "Путь к входному файлу")
+	flagSet.StringVar(&config.OutputFile, "output", "", "Путь к выходному файлу (опционально)")
+
+	if err := flagSet.Parse(args); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга аргументов: %v", err)
+	}
+
+	if err := validateDgstConfig(&config, algorithmStr); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+func parseCryptoCommand(args []string) (*Config, error) {
+	var config Config
+	config.Command = "encrypt"
 
 	flagSet := flag.NewFlagSet("cryptocore", flag.ContinueOnError)
 
@@ -41,7 +92,7 @@ func ParseCLI(args []string) (*Config, error) {
 		return nil, fmt.Errorf("ошибка парсинга аргументов: %v", err)
 	}
 
-	if err := validateConfig(&config); err != nil {
+	if err := validateCryptoConfig(&config); err != nil {
 		return nil, err
 	}
 
@@ -56,7 +107,31 @@ func ParseCLI(args []string) (*Config, error) {
 	return &config, nil
 }
 
-func validateConfig(config *Config) error {
+func validateDgstConfig(config *Config, algorithmStr string) error {
+	if algorithmStr == "" {
+		return errors.New("аргумент --algorithm обязателен для подкоманды dgst")
+	}
+
+	switch algorithmStr {
+	case "sha256":
+		config.HashAlgorithm = hash.SHA256
+	case "sha3-256":
+		config.HashAlgorithm = hash.SHA3_256
+	default:
+		return fmt.Errorf("неподдерживаемый алгоритм хеширования: %s (поддерживаются: sha256, sha3-256)", algorithmStr)
+	}
+
+	if config.InputFile == "" {
+		return errors.New("аргумент --input обязателен")
+	}
+	if _, err := os.Stat(config.InputFile); os.IsNotExist(err) {
+		return fmt.Errorf("входной файл не существует: %s", config.InputFile)
+	}
+
+	return nil
+}
+
+func validateCryptoConfig(config *Config) error {
 	if config.Algorithm == "" {
 		return errors.New("аргумент --algorithm обязателен")
 	}
@@ -83,7 +158,10 @@ func validateConfig(config *Config) error {
 		return errors.New("нельзя указывать одновременно --encrypt и --decrypt")
 	}
 	if !config.Encrypt && !config.Decrypt {
-		return errors.New("необходимо указать либо --encrypt, либо --decrypt")
+		if config.KeyStr != "" {
+			return errors.New("необходимо указать либо --encrypt, либо --decrypt")
+		}
+		config.Encrypt = true
 	}
 
 	if config.KeyStr == "" {

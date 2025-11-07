@@ -299,3 +299,28 @@ func WriteOutputFile(outputPath string, data []byte) error {
 
 	return nil
 }
+
+func WriteHashToFile(hashValue []byte, inputFile string, outputFile string) error {
+	outputDir := filepath.Dir(outputFile)
+	if outputDir != "." && outputDir != "" {
+		if err := os.MkdirAll(outputDir, 0755); err != nil {
+			return &FileIOError{
+				Operation: "создание директории",
+				Path:      outputDir,
+				Err:       err,
+			}
+		}
+	}
+
+	hashOutput := hex.EncodeToString(hashValue) + "  " + inputFile + "\n"
+
+	if err := os.WriteFile(outputFile, []byte(hashOutput), 0644); err != nil {
+		return &FileIOError{
+			Operation: "запись",
+			Path:      outputFile,
+			Err:       err,
+		}
+	}
+
+	return nil
+}
