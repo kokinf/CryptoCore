@@ -24,6 +24,8 @@ type Config struct {
 	IVStr         string
 	Command       string // encrypt, decrypt, или dgst
 	HashAlgorithm hash.HashAlgorithm
+	UseHMAC       bool
+	VerifyFile    string
 }
 
 func ParseCLI(args []string) (*Config, error) {
@@ -61,6 +63,9 @@ func parseDgstCommand(args []string) (*Config, error) {
 	flagSet.StringVar(&algorithmStr, "algorithm", "", "Алгоритм хеширования (sha256, sha3-256)")
 	flagSet.StringVar(&config.InputFile, "input", "", "Путь к входному файлу")
 	flagSet.StringVar(&config.OutputFile, "output", "", "Путь к выходному файлу (опционально)")
+	flagSet.BoolVar(&config.UseHMAC, "hmac", false, "Использовать HMAC (требует --key)")
+	flagSet.StringVar(&config.KeyStr, "key", "", "Ключ для HMAC в hex-формате")
+	flagSet.StringVar(&config.VerifyFile, "verify", "", "Файл с ожидаемым HMAC для проверки")
 
 	if err := flagSet.Parse(args); err != nil {
 		return nil, fmt.Errorf("ошибка парсинга аргументов: %v", err)
@@ -126,6 +131,26 @@ func validateDgstConfig(config *Config, algorithmStr string) error {
 	}
 	if _, err := os.Stat(config.InputFile); os.IsNotExist(err) {
 		return fmt.Errorf("входной файл не существует: %s", config.InputFile)
+	}
+
+	if config.UseHMAC {
+		if config.KeyStr == "" {
+			return errors.New("аргумент --key обязателен при использовании --hmac")
+		}
+
+		key, err := hex.DecodeString(config.KeyStr)
+		if err != nil {
+			return fmt.Errorf("некорректный формат ключа: %v (должен быть hex-строка)", err)
+		}
+		config.Key = key
+
+		if algorithmStr != "sha256" {
+			return errors.New("HMAC поддерживается только с алгоритмом sha256")
+		}
+	}
+
+	if config.VerifyFile != "" && !config.UseHMAC {
+		return errors.New("--verify может использоваться только с --hmac")
 	}
 
 	return nil

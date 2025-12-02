@@ -1,6 +1,6 @@
 # CryptoCore
 
-Командная утилита для шифрования, дешифрования и хеширования файлов с использованием AES-128 в различных режимах работы и криптографических хеш-функций.
+Командная утилита для шифрования, дешифрования, хеширования и аутентификации сообщений (HMAC) файлов с использованием AES-128 в различных режимах работы, криптографических хеш-функций и HMAC-SHA-256.
 
 ## Возможности
 
@@ -17,6 +17,11 @@
 - Вычисление криптографических хешей SHA-256 и SHA3-256
 - Проверка целостности файлов
 - Совместимость со стандартными утилитами
+
+### Аутентификация сообщений (HMAC)
+- HMAC-SHA-256 реализация с нуля согласно RFC 2104
+- Поддержка ключей любой длины
+- Обнаружение изменений в файлах и подмены ключей
 
 ### Общие возможности
 - Кроссплатформенная сборка (Windows, Linux, macOS)
@@ -92,6 +97,20 @@ go build -o cryptocore.exe ./src
 ./cryptocore dgst --algorithm sha3-256 --input backup.tar --output backup.sha3
 ```
 
+#### Аутентификация сообщений (HMAC)
+
+```bash
+# Генерация HMAC
+./cryptocore dgst --algorithm sha256 --hmac --key 00112233445566778899aabbccddeeff --input message.txt
+
+# Генерация HMAC с сохранением в файл
+./cryptocore dgst --algorithm sha256 --hmac --key 00112233445566778899aabbccddeeff --input message.txt --output message.hmac
+
+# Верификация HMAC
+./cryptocore dgst --algorithm sha256 --hmac --key 00112233445566778899aabbccddeeff --input message.txt --verify expected.hmac
+# Вывод: [OK] HMAC verification successful
+```
+
 ## Аргументы командной строки
 
 ### Шифрование/дешифрование
@@ -117,12 +136,23 @@ go build -o cryptocore.exe ./src
 | `--input` | Входной файл | `--input document.pdf` |
 | `--output` | Выходной файл (опционально) | `--output checksum.sha256` |
 
+### HMAC (подкоманда dgst)
+
+| Аргумент | Описание | Пример |
+|----------|-----------|---------|
+| `--hmac` | Включить режим HMAC | `--algorithm sha256 --hmac` |
+| `--key` | Ключ HMAC в hex-формате (обязателен) | `--key 00112233445566778899aabbccddeeff` |
+| `--verify` | Файл с ожидаемым HMAC для проверки | `--verify expected.hmac` |
 
 ## Особенности работы с ключами
 
 - **При шифровании**: аргумент `--key` является опциональным. Если ключ не указан, будет автоматически сгенерирован криптографически стойкий 16-байтный ключ и выведен в консоль
 - **При дешифровании**: аргумент `--key` является обязательным
 - **Формат ключа**: 32 символа в шестнадцатеричном формате (16 байт)
+
+### HMAC
+- **Ключ обязателен**: при использовании `--hmac` аргумент `--key` обязателен
+- **Любая длина**: HMAC поддерживает ключи любой длины (от 1 байта)
 
 ## Автоматическая генерация ключей
 
@@ -197,6 +227,14 @@ go build -o cryptocore.exe ./src
 - **Размер состояния**: 1600 бит
 - **Размер хеша**: 256 бит (32 байта)
 
+### HMAC-SHA-256
+
+- **Стандарт**: RFC 2104 и RFC 4231
+- **Архитектура**: HMAC(K, m) = H((K ⊕ opad) ∥ H((K ⊕ ipad) ∥ m))
+- **Поддерживает**: ключи любой длины
+- **Безопасность**: constant-time сравнение для верификации
+- **Тест-векторы**: Полностью соответствует RFC 4231
+
 ## Технические детали
 
 ### Алгоритм: AES-128
@@ -258,15 +296,15 @@ echo "What's up, guys?" > secret.txt
   --input secret.enc --output secret_decrypted.txt
 ```
 
-### Пример 2: Проверка целостности файлов
+### Пример 2: Проверка целостности файлов с HMAC
 
 ```bash
-# Вычисляем хеш перед отправкой
-./cryptocore dgst --algorithm sha256 --input important_file.iso --output file_checksum.sha256
+# Вычисляем HMAC перед отправкой
+./cryptocore dgst --algorithm sha256 --hmac --key секретный_ключ --input important_file.iso --output file_auth.hmac
 
-# Получатель проверяет хеш
-./cryptocore dgst --algorithm sha256 --input important_file.iso
-# Сравнивает результат с file_checksum.sha256
+# Получатель проверяет HMAC
+./cryptocore dgst --algorithm sha256 --hmac --key секретный_ключ --input important_file.iso --verify file_auth.hmac
+# Вывод: [OK] HMAC verification successful (если файл не изменен)
 ```
 
 ### Пример 3: Работа с разными режимами
@@ -313,7 +351,7 @@ echo "What's up, guys?" > secret.txt
 
 ## Совместимость с OpenSSL
 
-CryptoCore полностью совместим с OpenSSL для всех режимов шифрования и хеширования.
+CryptoCore полностью совместим с OpenSSL для всех режимов шифрования, хеширования и HMAC.
 
 ### Тестирование совместимости
 
@@ -365,7 +403,7 @@ openssl enc -aes-128-cbc \
 | OFB | `openssl enc -aes-128-ofb -K <key> -iv <iv> -in <input> -out <output>` | `openssl enc -aes-128-ofb -d -K <key> -iv <iv> -in <input> -out <output>` |
 | CTR | `openssl enc -aes-128-ctr -K <key> -iv <iv> -in <input> -out <output>` | `openssl enc -aes-128-ctr -d -K <key> -iv <iv> -in <input> -out <output>` |
 
-### Совместимость хеширования
+### Совместимость хеширования и HMAC
 
 ```bash
 # Наша реализация SHA-256
@@ -380,8 +418,12 @@ certutil -hashfile file.txt SHA256  # Windows
 
 # Системная утилита
 sha3sum -a 256 file.txt  # Linux/Mac
-certutil -hashfile file.txt SHA3-256  # Windows
 
+# Наша реализация HMAC-SHA-256
+./cryptocore dgst --algorithm sha256 --hmac --key 00112233445566778899aabbccddeeff --input file.txt
+
+# OpenSSL HMAC
+openssl dgst -sha256 -hmac 00112233445566778899aabbccddeeff file.txt
 ```
 
 ## Тестирование
@@ -402,6 +444,83 @@ go run test_csprng.go
 - Корректную генерацию данных различных размеров
 - Обработку граничных случаев и ошибок
 - Интеграцию с основной утилитой
+
+### Тестирование HMAC
+
+#### Тестовые векторы HMAC-SHA-256 (RFC 4231)
+
+Все тестовые векторы успешно пройдены реализацией:
+
+**Тест 1: Basic HMAC with 20-byte key**
+```bash
+echo -n "Hi There" > test1.txt
+./cryptocore dgst --algorithm sha256 --hmac --key 0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b0b --input test1.txt
+# Ожидаемый вывод: b0344c61d8db38535ca8afceaf0bf12b881dc200c9833da726e9376c2e32cff7  test1.txt
+```
+
+**Тест 2: HMAC with ASCII key ("Jefe")**
+```bash
+echo -n "what do ya want for nothing?" > test2.txt
+./cryptocore dgst --algorithm sha256 --hmac --key 4a656665 --input test2.txt
+# Ожидаемый вывод: 5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843  test2.txt
+```
+
+**Тест 3: HMAC with binary data (50 bytes 0xdd)**
+```bash
+python -c "open('test3.bin', 'wb').write(b'\xdd' * 50)"
+./cryptocore dgst --algorithm sha256 --hmac --key aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa --input test3.bin
+# Ожидаемый вывод: 773ea91e36800e46854db8ebd09181a72959098b3ef8c122d9635514ced565fe  test3.bin
+```
+
+**Тест 4: HMAC with 25-byte incremental key**
+```bash
+python -c "open('test4.bin', 'wb').write(b'\xcd' * 50)"
+./cryptocore dgst --algorithm sha256 --hmac --key 0102030405060708090a0b0c0d0e0f10111213141516171819 --input test4.bin
+# Ожидаемый вывод: 82558a389a443c0ea4cc819899f2083a85f0faa3e578f8077a2e3ff46729665b  test4.bin
+```
+
+**Короткий ключ (1 байт)**
+```bash
+echo "Test" > short_key.txt
+./cryptocore dgst --algorithm sha256 --hmac --key 01 --input short_key.txt
+# Результат: 29509a96fbdc60371d82e416af5cef88d095af2bd303987588ba4d32f2810a49  short_key.txt
+```
+
+**Длинный ключ (100 байт)**
+```bash
+echo "Test" > long_key.txt
+./cryptocore dgst --algorithm sha256 --hmac --key $(python -c "print('22' * 100)") --input long_key.txt
+# Результат: 3c8f1c3a84cc99562789c71cc05022f8c9e39b2ec7e18a416e7f6ab45a38d802  long_key.txt
+```
+
+**Пустой файл**
+```bash
+echo -n "" > empty.txt
+./cryptocore dgst --algorithm sha256 --hmac --key 00112233445566778899aabbccddeeff --input empty.txt
+# Результат: 81482a2844d68464f2354eb65632aa95e0fee94a0dca9aec471238434a4c4bdb  empty.txt
+```
+**Обнаружение изменений в файле**
+```bash
+echo "Original content" > file.txt
+./cryptocore dgst --algorithm sha256 --hmac --key 00112233445566778899aabbccddeeff --input file.txt --output original.hmac
+echo "Modified content" > file.txt
+./cryptocore dgst --algorithm sha256 --hmac --key 00112233445566778899aabbccddeeff --input file.txt --verify original.hmac
+# Ожидаемый вывод: Error: HMAC verification failed
+```
+**Обнаружение неправильного ключа**
+```bash
+echo "Test message" > message.txt
+./cryptocore dgst --algorithm sha256 --hmac --key 00112233445566778899aabbccddeeff --input message.txt --output correct.hmac
+./cryptocore dgst --algorithm sha256 --hmac --key ffeeddccbbaa99887766554433221100 --input message.txt --verify correct.hmac
+# Ожидаемый вывод: Error: HMAC verification failed
+```
+**Успешная верификация**
+```bash
+echo "Test message" > verify.txt
+./cryptocore dgst --algorithm sha256 --hmac --key 00112233445566778899aabbccddeeff --input verify.txt --output verify.hmac
+./cryptocore dgst --algorithm sha256 --hmac --key 00112233445566778899aabbccddeeff --input verify.txt --verify verify.hmac
+# Ожидаемый вывод: [OK] HMAC verification successful
+```
 
 ### NIST Statistical Test Suite
 
@@ -424,13 +543,15 @@ CryptoCore/
 │   │   ├── common.go     # Общие функции
 │   │   ├── sha256.go     # SHA-256
 │   │   └── sha3.go       # SHA3-256
-│   └── modes/            # Реализации режимов шифрования
-│       ├── common.go     # Общие функции
-│       ├── ecb.go        # Режим ECB
-│       ├── cbc.go        # Режим CBC
-│       ├── cfb.go        # Режим CFB
-│       ├── ofb.go        # Режим OFB
-│       └── ctr.go        # Режим CTR
+│   ├── modes/            # Реализации режимов шифрования
+│   │   ├── common.go     # Общие функции
+│   │   ├── ecb.go        # Режим ECB
+│   │   ├── cbc.go        # Режим CBC
+│   │   ├── cfb.go        # Режим CFB
+│   │   ├── ofb.go        # Режим OFB
+│   │   └── ctr.go        # Режим CTR
+│   └── mac/              # Реализации MAC функций
+│       └── hmac.go       # HMAC-SHA-256
 ├── tests/                # Тесты
 │   └── test_csprng.go    # Тесты криптографического ГСЧ
 ├── Makefile              # Система сборки

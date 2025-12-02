@@ -1,11 +1,15 @@
 package main
 
 import (
+	"crypto/subtle"
+	"cryptocore/src/mac"
 	"cryptocore/src/modes"
 	"encoding/hex"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 )
 
 type FileIOError struct {
@@ -24,6 +28,14 @@ func ExecuteCryptoOperation(config *Config) error {
 		return executeEncryption(config)
 	} else {
 		return executeDecryption(config)
+	}
+}
+
+func ExecuteMACOperation(config *Config) error {
+	if config.VerifyFile != "" {
+		return executeHMACVerification(config)
+	} else {
+		return executeHMACGeneration(config)
 	}
 }
 
@@ -201,6 +213,95 @@ func writeEncryptionOutput(config *Config, ciphertext []byte, iv []byte) error {
 		copy(finalOutput[16:], ciphertext)
 		return WriteOutputFile(config.OutputFile, finalOutput)
 	}
+}
+
+func executeHMACGeneration(config *Config) error {
+	hmac, err := mac.NewHMAC(config.Key)
+	if err != nil {
+		return fmt.Errorf("ошибка создания HMAC: %v", err)
+	}
+
+	hmacValue, err := hmac.ComputeFromFile(config.InputFile)
+	if err != nil {
+		return fmt.Errorf("ошибка вычисления HMAC: %v", err)
+	}
+
+	// HMAC_VALUE INPUT_FILE_PATH
+	hmacHex := hex.EncodeToString(hmacValue)
+	output := hmacHex + "  " + config.InputFile
+
+	if config.OutputFile != "" {
+		if err := WriteHashToFile(hmacValue, config.InputFile, config.OutputFile); err != nil {
+			return fmt.Errorf("ошибка записи HMAC в файл: %v", err)
+		}
+		fmt.Printf("HMAC written to: %s\n", config.OutputFile)
+	} else {
+		fmt.Println(output)
+	}
+
+	return nil
+}
+
+func executeHMACVerification(config *Config) error {
+	hmac, err := mac.NewHMAC(config.Key)
+	if err != nil {
+		return fmt.Errorf("ошибка создания HMAC: %v", err)
+	}
+
+	hmacValue, err := hmac.ComputeFromFile(config.InputFile)
+	if err != nil {
+		return fmt.Errorf("ошибка вычисления HMAC: %v", err)
+	}
+
+	expectedHMAC, err := readExpectedHMAC(config.VerifyFile)
+	if err != nil {
+		return fmt.Errorf("ошибка чтения ожидаемого HMAC: %v", err)
+	}
+
+	if subtle.ConstantTimeCompare(hmacValue, expectedHMAC) == 1 {
+		fmt.Printf("[OK] HMAC verification successful\n")
+		return nil
+	} else {
+		return fmt.Errorf("HMAC verification failed")
+	}
+}
+
+func readExpectedHMAC(filename string) ([]byte, error) {
+	data, err := os.ReadFile(filename)
+	if err != nil {
+		return nil, &FileIOError{
+			Operation: "чтение",
+			Path:      filename,
+			Err:       err,
+		}
+	}
+
+	lines := strings.Split(string(data), "\n")
+	if len(lines) == 0 {
+		return nil, errors.New("файл HMAC пуст")
+	}
+
+	firstLine := strings.TrimSpace(lines[0])
+	if firstLine == "" {
+		return nil, errors.New("первая строка файла HMAC пуста")
+	}
+
+	parts := strings.Fields(firstLine)
+	if len(parts) == 0 {
+		return nil, errors.New("не удалось распарсить файл HMAC")
+	}
+
+	hmacHex := parts[0]
+
+	if _, err := hex.DecodeString(hmacHex); err != nil {
+		return nil, fmt.Errorf("некорректный формат HMAC в файле: %v", err)
+	}
+
+	if len(hmacHex) != 64 {
+		return nil, fmt.Errorf("некорректная длина HMAC: %d символов (ожидалось 64 для SHA-256)", len(hmacHex))
+	}
+
+	return hex.DecodeString(hmacHex)
 }
 
 func ReadEncryptedFileWithIV(filePath string) ([]byte, []byte, error) {

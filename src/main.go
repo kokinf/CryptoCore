@@ -28,23 +28,27 @@ func main() {
 }
 
 func ExecuteHashOperation(config *Config) error {
-	result, err := hash.ComputeHash(config.HashAlgorithm, config.InputFile)
-	if err != nil {
-		return fmt.Errorf("ошибка вычисления хеша: %v", err)
-	}
-
-	hashOutput := result.String()
-
-	if config.OutputFile != "" {
-		if err := WriteHashToFile(result.Hash, config.InputFile, config.OutputFile); err != nil {
-			return fmt.Errorf("ошибка записи хеша в файл: %v", err)
-		}
-		fmt.Printf("Hash written to: %s\n", config.OutputFile)
+	if config.UseHMAC {
+		return ExecuteMACOperation(config)
 	} else {
-		fmt.Println(hashOutput)
-	}
+		result, err := hash.ComputeHash(config.HashAlgorithm, config.InputFile)
+		if err != nil {
+			return fmt.Errorf("ошибка вычисления хеша: %v", err)
+		}
 
-	return nil
+		hashOutput := result.String()
+
+		if config.OutputFile != "" {
+			if err := WriteHashToFile(result.Hash, config.InputFile, config.OutputFile); err != nil {
+				return fmt.Errorf("ошибка записи хеша в файл: %v", err)
+			}
+			fmt.Printf("Hash written to: %s\n", config.OutputFile)
+		} else {
+			fmt.Println(hashOutput)
+		}
+
+		return nil
+	}
 }
 
 func printErrorAndExit(err error) {
