@@ -1,4 +1,4 @@
-package main
+package csprng
 
 import (
 	"crypto/rand"

@@ -26,6 +26,10 @@ type Config struct {
 	HashAlgorithm hash.HashAlgorithm
 	UseHMAC       bool
 	VerifyFile    string
+	AAD           []byte
+	AADStr        string
+	UseAEAD       bool
+	UseETM        bool
 }
 
 func ParseCLI(args []string) (*Config, error) {
@@ -83,18 +87,34 @@ func parseCryptoCommand(args []string) (*Config, error) {
 	config.Command = "encrypt"
 
 	flagSet := flag.NewFlagSet("cryptocore", flag.ContinueOnError)
+	flagSet.SetOutput(os.Stderr)
 
 	flagSet.StringVar(&config.Algorithm, "algorithm", "", "Алгоритм шифрования (aes)")
-	flagSet.StringVar(&config.Mode, "mode", "", "Режим работы (ecb, cbc, cfb, ofb, ctr)")
+	flagSet.StringVar(&config.Mode, "mode", "", "Режим работы (ecb, cbc, cfb, ofb, ctr, gcm)")
 	flagSet.BoolVar(&config.Encrypt, "encrypt", false, "Выполнить шифрование")
 	flagSet.BoolVar(&config.Decrypt, "decrypt", false, "Выполнить дешифрование")
 	flagSet.StringVar(&config.KeyStr, "key", "", "Ключ шифрования в hex-формате (опционально для шифрования)")
 	flagSet.StringVar(&config.InputFile, "input", "", "Путь к входному файлу")
 	flagSet.StringVar(&config.OutputFile, "output", "", "Путь к выходному файлу")
-	flagSet.StringVar(&config.IVStr, "iv", "", "Вектор инициализации в hex-формате (только для дешифрования)")
+	flagSet.StringVar(&config.IVStr, "iv", "", "Вектор инициализации в hex-формате (для дешифрования)")
+	flagSet.StringVar(&config.AADStr, "aad", "", "Дополнительные аутентифицированные данные в hex-формате (для AEAD режимов)")
 
 	if err := flagSet.Parse(args); err != nil {
+		if strings.Contains(err.Error(), "flag needs an argument") && strings.Contains(err.Error(), "-aad") {
+			return parseCryptoCommandManual(args)
+		}
 		return nil, fmt.Errorf("ошибка парсинга аргументов: %v", err)
+	}
+
+	config.UseAEAD = isAEADMode(config.Mode)
+
+	if config.KeyStr != "" {
+		key, err := hex.DecodeString(config.KeyStr)
+		if err == nil {
+			if len(key) == 48 && config.Mode != "gcm" {
+				config.UseETM = true
+			}
+		}
 	}
 
 	if err := validateCryptoConfig(&config); err != nil {
@@ -109,7 +129,101 @@ func parseCryptoCommand(args []string) (*Config, error) {
 		return nil, err
 	}
 
+	if err := validateAAD(&config); err != nil {
+		return nil, err
+	}
+
 	return &config, nil
+}
+
+func parseCryptoCommandManual(args []string) (*Config, error) {
+	var config Config
+	config.Command = "encrypt"
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		switch arg {
+		case "--algorithm":
+			if i+1 < len(args) {
+				config.Algorithm = args[i+1]
+				i++
+			}
+		case "--mode":
+			if i+1 < len(args) {
+				config.Mode = args[i+1]
+				i++
+			}
+		case "--encrypt":
+			config.Encrypt = true
+		case "--decrypt":
+			config.Decrypt = true
+		case "--key":
+			if i+1 < len(args) {
+				config.KeyStr = args[i+1]
+				i++
+			}
+		case "--input":
+			if i+1 < len(args) {
+				config.InputFile = args[i+1]
+				i++
+			}
+		case "--output":
+			if i+1 < len(args) {
+				config.OutputFile = args[i+1]
+				i++
+			}
+		case "--iv":
+			if i+1 < len(args) {
+				config.IVStr = args[i+1]
+				i++
+			}
+		case "--aad":
+			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
+				config.AADStr = args[i+1]
+				i++
+			} else {
+				config.AADStr = ""
+			}
+		}
+	}
+
+	config.UseAEAD = isAEADMode(config.Mode)
+
+	if config.KeyStr != "" {
+		key, err := hex.DecodeString(config.KeyStr)
+		if err == nil {
+			if len(key) == 48 && config.Mode != "gcm" {
+				config.UseETM = true
+				fmt.Fprintf(os.Stderr, "Используется Encrypt-then-MAC режим\n")
+			}
+		}
+	}
+
+	if err := validateCryptoConfig(&config); err != nil {
+		return nil, err
+	}
+
+	if config.OutputFile == "" {
+		config.OutputFile = deriveOutputFilename(config.InputFile, config.Encrypt, config.Mode)
+	}
+
+	if err := validateIVLogic(&config); err != nil {
+		return nil, err
+	}
+
+	if err := validateAAD(&config); err != nil {
+		return nil, err
+	}
+
+	return &config, nil
+}
+
+func isAEADMode(mode string) bool {
+	aeadModes := map[string]bool{
+		"gcm": true,
+	}
+	return aeadModes[mode]
 }
 
 func validateDgstConfig(config *Config, algorithmStr string) error {
@@ -174,9 +288,10 @@ func validateCryptoConfig(config *Config) error {
 		"cfb": true,
 		"ofb": true,
 		"ctr": true,
+		"gcm": true,
 	}
 	if !supportedModes[config.Mode] {
-		return fmt.Errorf("неподдерживаемый режим: %s (поддерживаются: ecb, cbc, cfb, ofb, ctr)", config.Mode)
+		return fmt.Errorf("неподдерживаемый режим: %s (поддерживаются: ecb, cbc, cfb, ofb, ctr, gcm)", config.Mode)
 	}
 
 	if config.Encrypt && config.Decrypt {
@@ -199,9 +314,21 @@ func validateCryptoConfig(config *Config) error {
 		if err != nil {
 			return fmt.Errorf("некорректный формат ключа: %v (должен быть hex-строка)", err)
 		}
-		if len(key) != 16 {
-			return fmt.Errorf("некорректная длина ключа: %d байт (должно быть 16 байт для AES-128)", len(key))
+
+		if config.Mode == "gcm" {
+			if len(key) != 16 && len(key) != 24 && len(key) != 32 {
+				return fmt.Errorf("некорректная длина ключа для GCM: %d байт (должно быть 16, 24 или 32 байта)", len(key))
+			}
+		} else {
+			if len(key) != 16 && len(key) != 48 {
+				return fmt.Errorf("некорректная длина ключа: %d байт (должно быть 16 байт для AES-128 или 48 байт для Encrypt-then-MAC)", len(key))
+			}
+
+			if len(key) == 48 {
+				config.UseETM = true
+			}
 		}
+
 		config.Key = key
 
 		if isWeakKey(key) {
@@ -212,8 +339,96 @@ func validateCryptoConfig(config *Config) error {
 	if config.InputFile == "" {
 		return errors.New("аргумент --input обязателен")
 	}
-	if _, err := os.Stat(config.InputFile); os.IsNotExist(err) {
+
+	if config.Encrypt && config.Key == nil {
+	} else if _, err := os.Stat(config.InputFile); os.IsNotExist(err) {
 		return fmt.Errorf("входной файл не существует: %s", config.InputFile)
+	}
+
+	return nil
+}
+
+func validateIVLogic(config *Config) error {
+	if config.Encrypt {
+		if config.Mode == "gcm" {
+			if config.IVStr != "" {
+				iv, err := hex.DecodeString(config.IVStr)
+				if err != nil {
+					return fmt.Errorf("некорректный формат IV/nonce: %v (должен быть hex-строка)", err)
+				}
+
+				if len(iv) != 12 {
+					return fmt.Errorf("некорректная длина nonce для GCM: %d байт (должно быть 12 байт)", len(iv))
+				}
+
+				config.IV = iv
+				fmt.Fprintf(os.Stderr, "Используется указанный nonce: %s\n", config.IVStr)
+			} else {
+				fmt.Fprintf(os.Stderr, "Nonce не указан, будет сгенерирован случайный 12-байтный nonce\n")
+			}
+		} else if config.IVStr != "" {
+			fmt.Fprintf(os.Stderr, "Предупреждение: --iv игнорируется при шифровании (IV генерируется автоматически)\n")
+		}
+	} else if config.Decrypt {
+		if config.Mode == "ecb" {
+			if config.IVStr != "" {
+				fmt.Fprintf(os.Stderr, "Предупреждение: --iv игнорируется для режима ECB\n")
+			}
+		} else if config.Mode == "gcm" {
+			if config.IVStr != "" {
+				iv, err := hex.DecodeString(config.IVStr)
+				if err != nil {
+					return fmt.Errorf("некорректный формат IV/nonce: %v (должен быть hex-строка)", err)
+				}
+
+				if len(iv) != 12 {
+					return fmt.Errorf("некорректная длина nonce для GCM: %d байт (должно быть 12 байт)", len(iv))
+				}
+
+				config.IV = iv
+				fmt.Fprintf(os.Stderr, "Используется указанный nonce\n")
+			} else {
+				fmt.Fprintf(os.Stderr, "Nonce не указан, будет прочитан из начала файла %s\n", config.InputFile)
+			}
+		} else {
+			if config.IVStr == "" {
+				fmt.Fprintf(os.Stderr, "IV не указан, будет прочитан из начала файла %s\n", config.InputFile)
+			} else {
+				iv, err := hex.DecodeString(config.IVStr)
+				if err != nil {
+					return fmt.Errorf("некорректный формат IV: %v (должен быть hex-строка)", err)
+				}
+
+				if len(iv) != 16 {
+					return fmt.Errorf("некорректная длина IV: %d байт (должно быть 16 байт)", len(iv))
+				}
+
+				config.IV = iv
+				fmt.Fprintf(os.Stderr, "Используется указанный IV\n")
+			}
+		}
+	}
+
+	return nil
+}
+
+func validateAAD(config *Config) error {
+	if config.AADStr != "" {
+		if config.AADStr == `""` || config.AADStr == "''" || config.AADStr == "00" {
+			config.AAD = []byte{}
+		} else {
+			aad, err := hex.DecodeString(config.AADStr)
+			if err != nil {
+				return fmt.Errorf("некорректный формат AAD: %v (должен быть hex-строка)", err)
+			}
+			config.AAD = aad
+		}
+
+		if !config.UseAEAD && !config.UseETM {
+			fmt.Fprintf(os.Stderr, "Предупреждение: AAD игнорируется для не-AEAD режима %s\n", config.Mode)
+		}
+	} else if config.UseAEAD || config.UseETM {
+		config.AAD = []byte{}
 	}
 
 	return nil
@@ -307,38 +522,6 @@ func hasRepeatingPattern(key []byte) bool {
 	return false
 }
 
-func validateIVLogic(config *Config) error {
-	if config.Encrypt {
-		if config.IVStr != "" {
-			fmt.Fprintf(os.Stderr, "Предупреждение: --iv игнорируется при шифровании (IV генерируется автоматически)\n")
-		}
-	} else if config.Decrypt {
-		if config.Mode == "ecb" {
-			if config.IVStr != "" {
-				fmt.Fprintf(os.Stderr, "Предупреждение: --iv игнорируется для режима ECB\n")
-			}
-		} else {
-			if config.IVStr == "" {
-				fmt.Fprintf(os.Stderr, "IV не указан, будет прочитан из начала файла %s\n", config.InputFile)
-			} else {
-				iv, err := hex.DecodeString(config.IVStr)
-				if err != nil {
-					return fmt.Errorf("некорректный формат IV: %v (должен быть hex-строка)", err)
-				}
-
-				if len(iv) != 16 {
-					return fmt.Errorf("некорректная длина IV: %d байт (должно быть 16 байт)", len(iv))
-				}
-
-				config.IV = iv
-				fmt.Fprintf(os.Stderr, "Используется указанный IV\n")
-			}
-		}
-	}
-
-	return nil
-}
-
 // deriveOutputFilename автоматическая генерация выходного файла, если он не указан
 func deriveOutputFilename(inputFile string, encrypt bool, mode string) string {
 	base := filepath.Base(inputFile)
@@ -346,19 +529,29 @@ func deriveOutputFilename(inputFile string, encrypt bool, mode string) string {
 	name := strings.TrimSuffix(base, ext)
 
 	if encrypt {
-		if mode != "ecb" {
-			return fmt.Sprintf("%s_%s.enc", name, mode)
+		switch mode {
+		case "gcm":
+			return fmt.Sprintf("%s_%s.aead", name, mode)
+		default:
+			if mode != "ecb" {
+				return fmt.Sprintf("%s_%s.enc", name, mode)
+			}
+			return name + ".enc"
 		}
-		return name + ".enc"
 	} else {
-		if strings.HasSuffix(base, ".enc") {
+		if strings.HasSuffix(base, ".enc") || strings.HasSuffix(base, ".aead") || strings.HasSuffix(base, ".etm") {
 			base = strings.TrimSuffix(base, ".enc")
+			base = strings.TrimSuffix(base, ".aead")
+			base = strings.TrimSuffix(base, ".etm")
 			ext = filepath.Ext(base)
 			name = strings.TrimSuffix(base, ext)
 
-			if strings.HasSuffix(name, "_ecb") || strings.HasSuffix(name, "_cbc") || strings.HasSuffix(name, "_cfb") || strings.HasSuffix(name, "_ofb") ||
-				strings.HasSuffix(name, "_ctr") {
-				name = strings.TrimSuffix(name, "_"+mode)
+			modeSuffixes := []string{"_ecb", "_cbc", "_cfb", "_ofb", "_ctr", "_gcm"}
+			for _, suffix := range modeSuffixes {
+				if strings.HasSuffix(name, suffix) {
+					name = strings.TrimSuffix(name, suffix)
+					break
+				}
 			}
 
 			return name + ".dec" + ext
