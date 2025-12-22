@@ -17,6 +17,10 @@ func main() {
 		if err := ExecuteHashOperation(config); err != nil {
 			printErrorAndExit(err)
 		}
+	case "derive":
+		if err := ExecuteKDFOperation(config); err != nil {
+			printErrorAndExit(err)
+		}
 	default: // encrypt или decrypt
 		if err := ExecuteCryptoOperation(config); err != nil {
 			printErrorAndExit(err)

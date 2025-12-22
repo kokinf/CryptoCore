@@ -1,6 +1,7 @@
 package main
 
 import (
+	"cryptocore/src/csprng"
 	"cryptocore/src/hash"
 	"encoding/hex"
 	"errors"
@@ -22,7 +23,7 @@ type Config struct {
 	OutputFile    string
 	IV            []byte
 	IVStr         string
-	Command       string // encrypt, decrypt, или dgst
+	Command       string // encrypt, decrypt, dgst, или derive
 	HashAlgorithm hash.HashAlgorithm
 	UseHMAC       bool
 	VerifyFile    string
@@ -30,6 +31,12 @@ type Config struct {
 	AADStr        string
 	UseAEAD       bool
 	UseETM        bool
+	Password      string
+	SaltStr       string
+	Salt          []byte
+	Iterations    int
+	KeyLength     int
+	KDFAlgorithm  string
 }
 
 func ParseCLI(args []string) (*Config, error) {
@@ -40,21 +47,102 @@ func ParseCLI(args []string) (*Config, error) {
 	var command string
 	var remainingArgs []string
 
-	if args[0] == "dgst" {
+	switch args[0] {
+	case "dgst":
 		command = "dgst"
 		remainingArgs = args[1:]
-	} else if strings.HasPrefix(args[0], "-") {
-		command = "encrypt"
-		remainingArgs = args
-	} else {
-		return nil, fmt.Errorf("неизвестная подкоманда: %s. Поддерживаются: dgst", args[0])
+	case "derive":
+		command = "derive"
+		remainingArgs = args[1:]
+	case "encrypt", "decrypt":
+		command = args[0]
+		remainingArgs = args[1:]
+	default:
+		if strings.HasPrefix(args[0], "-") {
+			command = "encrypt"
+			remainingArgs = args
+		} else {
+			return nil, fmt.Errorf("неизвестная подкоманда: %s. Поддерживаются: dgst, derive, encrypt, decrypt", args[0])
+		}
 	}
 
-	if command == "dgst" {
+	switch command {
+	case "dgst":
 		return parseDgstCommand(remainingArgs)
-	} else {
+	case "derive":
+		return parseDeriveCommand(remainingArgs)
+	default:
 		return parseCryptoCommand(remainingArgs)
 	}
+}
+
+func parseDeriveCommand(args []string) (*Config, error) {
+	var config Config
+	config.Command = "derive"
+
+	flagSet := flag.NewFlagSet("cryptocore derive", flag.ContinueOnError)
+	flagSet.SetOutput(os.Stderr)
+
+	flagSet.StringVar(&config.Password, "password", "", "Пароль для выработки ключа")
+	flagSet.StringVar(&config.SaltStr, "salt", "", "Соль в hex-формате (опционально)")
+	flagSet.IntVar(&config.Iterations, "iterations", 100000, "Количество итераций (по умолчанию: 100000)")
+	flagSet.IntVar(&config.KeyLength, "length", 32, "Длина ключа в байтах (по умолчанию: 32)")
+	flagSet.StringVar(&config.OutputFile, "output", "", "Выходной файл для ключа (опционально)")
+	flagSet.StringVar(&config.KDFAlgorithm, "algorithm", "pbkdf2", "Алгоритм KDF (только pbkdf2)")
+
+	if err := flagSet.Parse(args); err != nil {
+		return nil, fmt.Errorf("ошибка парсинга аргументов: %v", err)
+	}
+
+	if config.Password == "" {
+		return nil, errors.New("аргумент --password обязателен для подкоманды derive")
+	}
+
+	if config.KDFAlgorithm != "pbkdf2" {
+		return nil, fmt.Errorf("неподдерживаемый алгоритм KDF: %s (поддерживается только pbkdf2)", config.KDFAlgorithm)
+	}
+
+	if config.Iterations < 1 {
+		return nil, errors.New("количество итераций должно быть положительным")
+	}
+
+	if config.Iterations < 1000 {
+		fmt.Fprintf(os.Stderr, "Предупреждение: количество итераций (%d) меньше минимального рекомендуемого (1000)\n", config.Iterations)
+	}
+
+	if config.KeyLength < 1 {
+		return nil, errors.New("длина ключа должна быть положительной")
+	}
+
+	maxKeyLength := (1<<32 - 1) * 32
+	if config.KeyLength > maxKeyLength {
+		return nil, fmt.Errorf("длина ключа слишком большая: %d байт (максимум: %d)", config.KeyLength, maxKeyLength)
+	}
+
+	if config.SaltStr == "" {
+		fmt.Fprintf(os.Stderr, "Соль не указана, будет сгенерирована случайная 16-байтная соль\n")
+		salt, err := csprng.GenerateRandomBytes(16)
+		if err != nil {
+			return nil, fmt.Errorf("ошибка генерации соли: %v", err)
+		}
+		config.Salt = salt
+	} else {
+		salt, err := hex.DecodeString(config.SaltStr)
+		if err != nil {
+			return nil, fmt.Errorf("некорректный формат соли: %v (должна быть hex-строка)", err)
+		}
+		config.Salt = salt
+
+		if len(salt) < 8 {
+			fmt.Fprintf(os.Stderr, "Предупреждение: длина соли (%d байт) меньше минимальной рекомендуемой (8 байт)\n", len(salt))
+		}
+	}
+
+	if len(config.Password) < 8 {
+		fmt.Fprintf(os.Stderr, "Предупреждение: пароль слишком короткий (%d символов). Рекомендуется использовать пароли длиной не менее 8 символов\n", len(config.Password))
+	}
+
+	return &config, nil
 }
 
 func parseDgstCommand(args []string) (*Config, error) {
@@ -62,6 +150,7 @@ func parseDgstCommand(args []string) (*Config, error) {
 	config.Command = "dgst"
 
 	flagSet := flag.NewFlagSet("cryptocore dgst", flag.ContinueOnError)
+	flagSet.SetOutput(os.Stderr)
 
 	var algorithmStr string
 	flagSet.StringVar(&algorithmStr, "algorithm", "", "Алгоритм хеширования (sha256, sha3-256)")
@@ -525,7 +614,7 @@ func hasRepeatingPattern(key []byte) bool {
 // deriveOutputFilename автоматическая генерация выходного файла, если он не указан
 func deriveOutputFilename(inputFile string, encrypt bool, mode string) string {
 	base := filepath.Base(inputFile)
-	ext := filepath.Ext(inputFile)
+	ext := filepath.Ext(base)
 	name := strings.TrimSuffix(base, ext)
 
 	if encrypt {

@@ -4,6 +4,7 @@ import (
 	"crypto/subtle"
 	"cryptocore/src/aead"
 	"cryptocore/src/csprng"
+	"cryptocore/src/kdf"
 	"cryptocore/src/mac"
 	"cryptocore/src/modes"
 	"encoding/hex"
@@ -38,6 +39,62 @@ func ExecuteMACOperation(config *Config) error {
 		return executeHMACVerification(config)
 	} else {
 		return executeHMACGeneration(config)
+	}
+}
+
+func ExecuteKDFOperation(config *Config) error {
+	if config.KDFAlgorithm != "pbkdf2" {
+		return fmt.Errorf("неподдерживаемый алгоритм KDF: %s", config.KDFAlgorithm)
+	}
+
+	password := []byte(config.Password)
+
+	fmt.Fprintf(os.Stderr, "Выполняется PBKDF2-HMAC-SHA256 с %d итерациями...\n", config.Iterations)
+	derivedKey, err := kdf.PBKDF2HMACSHA256(password, config.Salt, config.Iterations, config.KeyLength)
+	if err != nil {
+		return fmt.Errorf("ошибка выработки ключа: %v", err)
+	}
+
+	keyHex := hex.EncodeToString(derivedKey)
+	saltHex := hex.EncodeToString(config.Salt)
+
+	if config.OutputFile != "" {
+		if err := WriteOutputFile(config.OutputFile, derivedKey); err != nil {
+			return fmt.Errorf("ошибка записи ключа в файл: %v", err)
+		}
+
+		fmt.Printf("Derived key (hex): %s\n", keyHex)
+		fmt.Printf("Salt used (hex): %s\n", saltHex)
+		fmt.Printf("Key written to: %s (%d bytes, binary format)\n", config.OutputFile, len(derivedKey))
+
+		infoFile := config.OutputFile + ".info"
+		infoContent := fmt.Sprintf("Key derivation parameters:\n"+
+			"Algorithm: PBKDF2-HMAC-SHA256\n"+
+			"Iterations: %d\n"+
+			"Key length: %d bytes\n"+
+			"Salt (hex): %s\n"+
+			"Derived key (hex): %s\n",
+			config.Iterations, config.KeyLength, saltHex, keyHex)
+
+		if err := os.WriteFile(infoFile, []byte(infoContent), 0644); err != nil {
+			fmt.Fprintf(os.Stderr, "Предупреждение: не удалось создать файл с информацией: %v\n", err)
+		} else {
+			fmt.Printf("Parameters written to: %s\n", infoFile)
+		}
+	} else {
+		// KEY_HEX SALT_HEX
+		fmt.Printf("%s %s\n", keyHex, saltHex)
+	}
+
+	clearBytes(password)
+	clearBytes(derivedKey)
+
+	return nil
+}
+
+func clearBytes(b []byte) {
+	for i := range b {
+		b[i] = 0
 	}
 }
 
@@ -494,6 +551,7 @@ func readExpectedHMAC(filename string) ([]byte, error) {
 
 	return hex.DecodeString(hmacHex)
 }
+
 func ReadEncryptedFileWithIV(filePath string) ([]byte, []byte, error) {
 	data, err := ReadInputFile(filePath)
 	if err != nil {
@@ -638,12 +696,67 @@ func WriteHashToFile(hashValue []byte, inputFile string, outputFile string) erro
 	return nil
 }
 
+func WriteKDFOutput(outputPath string, derivedKey, salt []byte, iterations, keyLength int) error {
+	outputDir := filepath.Dir(outputPath)
+	if outputDir != "." && outputDir != "" {
+		if err := os.MkdirAll(outputDir, 0755); err != nil {
+			return &FileIOError{
+				Operation: "создание директории",
+				Path:      outputDir,
+				Err:       err,
+			}
+		}
+	}
+
+	if err := os.WriteFile(outputPath, derivedKey, 0644); err != nil {
+		return &FileIOError{
+			Operation: "запись ключа",
+			Path:      outputPath,
+			Err:       err,
+		}
+	}
+
+	infoPath := outputPath + ".info"
+	infoContent := fmt.Sprintf("PBKDF2-HMAC-SHA256 Key Derivation Parameters\n"+
+		"=============================================\n"+
+		"Iterations: %d\n"+
+		"Key length: %d bytes\n"+
+		"Key (hex): %s\n"+
+		"Salt (hex): %s\n"+
+		"Salt length: %d bytes\n"+
+		"Generated: %s\n",
+		iterations, keyLength,
+		hex.EncodeToString(derivedKey),
+		hex.EncodeToString(salt),
+		len(salt),
+		"now")
+
+	if err := os.WriteFile(infoPath, []byte(infoContent), 0644); err != nil {
+		fmt.Fprintf(os.Stderr, "Предупреждение: не удалось создать файл с информацией: %v\n", err)
+	}
+
+	return nil
+}
+
 // CleanupFailedOutput удаляет выходной файл при ошибке аутентификации
 func CleanupFailedOutput(outputPath string) {
 	if outputPath != "" {
 		if _, err := os.Stat(outputPath); err == nil {
 			os.Remove(outputPath)
 			fmt.Fprintf(os.Stderr, "Удален выходной файл из-за ошибки аутентификации: %s\n", outputPath)
+		}
+	}
+}
+
+func CleanupKDFOutput(outputPath string) {
+	if outputPath != "" {
+		if _, err := os.Stat(outputPath); err == nil {
+			os.Remove(outputPath)
+		}
+
+		infoPath := outputPath + ".info"
+		if _, err := os.Stat(infoPath); err == nil {
+			os.Remove(infoPath)
 		}
 	}
 }
