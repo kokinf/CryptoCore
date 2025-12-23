@@ -1,6 +1,7 @@
 package kdf
 
 import (
+	"crypto/subtle"
 	"cryptocore/src/mac"
 	"encoding/binary"
 	"errors"
@@ -45,12 +46,16 @@ func DeriveKey(masterKey []byte, context string, length int) ([]byte, error) {
 }
 
 func HKDFExtract(hashFunc string, salt, ikm []byte) ([]byte, error) {
-	if len(salt) == 0 {
+	var processedSalt []byte
 
-		salt = make([]byte, 32)
+	if len(salt) == 0 {
+		processedSalt = make([]byte, 32)
+	} else {
+		processedSalt = make([]byte, len(salt))
+		copy(processedSalt, salt)
 	}
 
-	hmac, err := mac.NewHMAC(salt)
+	hmac, err := mac.NewHMAC(processedSalt)
 	if err != nil {
 		return nil, err
 	}
@@ -180,18 +185,12 @@ func VerifyKeyDerivation(masterKey []byte, context string, derivedKey []byte) (b
 
 	recreatedKey, err := DeriveKey(masterKey, context, len(derivedKey))
 	if err != nil {
-		return false, err
+		return false, fmt.Errorf("ошибка при повторной выработке ключа: %v", err)
 	}
 
-	if len(recreatedKey) != len(derivedKey) {
-		return false, nil
+	if subtle.ConstantTimeCompare(recreatedKey, derivedKey) == 1 {
+		return true, nil
 	}
 
-	for i := 0; i < len(derivedKey); i++ {
-		if recreatedKey[i] != derivedKey[i] {
-			return false, nil
-		}
-	}
-
-	return true, nil
+	return false, nil
 }
