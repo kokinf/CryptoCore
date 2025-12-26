@@ -10,6 +10,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"strings"
@@ -107,35 +108,185 @@ func generateRandomNonce() ([]byte, error) {
 }
 
 func executeEncryption(config *Config) error {
-	plaintext, err := ReadInputFile(config.InputFile)
+	// Проверяем размер файла для выбора метода обработки
+	fileInfo, err := os.Stat(config.InputFile)
 	if err != nil {
-		return err
-	}
-
-	if config.UseAEAD {
-		if config.Mode == "gcm" {
-			return executeGCMEncryption(config, plaintext)
+		return &FileIOError{
+			Operation: "получение размера файла",
+			Path:      config.InputFile,
+			Err:       err,
 		}
 	}
 
-	if config.UseETM {
-		return executeETMEncryption(config, plaintext)
-	}
+	fileSize := fileInfo.Size()
+	const memoryThreshold int64 = 100 * 1024 * 1024 // 100MB порог
 
-	return executeRegularEncryption(config, plaintext)
+	if fileSize > memoryThreshold {
+		// Используем потоковую обработку для больших файлов
+		return executeStreamEncryption(config)
+	} else {
+		// Используем обычную обработку для маленьких файлов
+		plaintext, err := ReadInputFile(config.InputFile)
+		if err != nil {
+			return err
+		}
+
+		if config.UseAEAD {
+			if config.Mode == "gcm" {
+				return executeGCMEncryption(config, plaintext)
+			}
+		}
+
+		if config.UseETM {
+			return executeETMEncryption(config, plaintext)
+		}
+
+		return executeRegularEncryptionWithIV(config, plaintext)
+	}
 }
 
-func executeRegularEncryption(config *Config, plaintext []byte) error {
+func executeStreamEncryption(config *Config) error {
+	// Открываем файлы для потоковой обработки
+	inputReader, err := ReadInputFileStream(config.InputFile)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closer, ok := inputReader.(io.Closer); ok {
+			closer.Close()
+		}
+	}()
+
+	outputWriter, err := WriteOutputFileStream(config.OutputFile)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closer, ok := outputWriter.(io.Closer); ok {
+			closer.Close()
+		}
+	}()
+
+	// Генерируем или используем указанный IV/nonce
+	var iv []byte
+	if config.IV != nil {
+		iv = config.IV
+		if config.Mode == "gcm" {
+			fmt.Printf("Используется указанный nonce: %s\n", hex.EncodeToString(iv))
+		} else if config.Mode != "ecb" {
+			fmt.Printf("Используется указанный IV: %s\n", hex.EncodeToString(iv))
+		}
+	} else {
+		// Генерируем IV в зависимости от режима
+		if config.Mode == "gcm" {
+			iv, err = generateRandomNonce()
+		} else if config.Mode != "ecb" {
+			iv, err = generateRandomIV()
+		}
+		if err != nil {
+			return fmt.Errorf("ошибка генерации IV: %v", err)
+		}
+
+		if config.Mode == "gcm" {
+			fmt.Printf("Сгенерированный nonce: %s\n", hex.EncodeToString(iv))
+		} else if config.Mode != "ecb" {
+			fmt.Printf("Сгенерированный IV: %s\n", hex.EncodeToString(iv))
+		}
+	}
+
+	// Генерируем ключ если не указан
+	var key []byte
+	if config.Key == nil {
+		key, err = csprng.GenerateRandomBytes(16)
+		if err != nil {
+			return fmt.Errorf("ошибка генерации ключа: %v", err)
+		}
+		config.Key = key
+		fmt.Printf("Сгенерированный ключ: %s\n", hex.EncodeToString(config.Key))
+	} else {
+		key = config.Key
+	}
+
+	// Для GCM используем специальную потоковую обработку
+	if config.Mode == "gcm" {
+		return executeStreamGCMEncryption(config, inputReader, outputWriter, key, iv)
+	}
+
+	// Для ETM пока не поддерживаем потоковую обработку
+	if config.UseETM {
+		return fmt.Errorf("потоковая обработка для Encrypt-then-MAC пока не поддерживается для больших файлов")
+	}
+
+	// Для обычных режимов (CBC, CTR, CFB, OFB, ECB)
+	// Записываем IV в начало файла (кроме ECB)
+	if config.Mode != "ecb" {
+		if _, err := outputWriter.Write(iv); err != nil {
+			return &FileIOError{
+				Operation: "запись IV",
+				Path:      config.OutputFile,
+				Err:       err,
+			}
+		}
+	}
+
+	// Выполняем потоковое шифрование для обычных режимов
+	if err := modes.StreamEncrypt(inputReader, outputWriter, key, config.Mode, iv); err != nil {
+		return fmt.Errorf("ошибка потокового шифрования: %v", err)
+	}
+
+	return nil
+}
+
+func executeStreamGCMEncryption(config *Config, reader io.Reader, writer io.Writer, key, nonce []byte) error {
+	gcm, err := aead.NewGCM(key)
+	if err != nil {
+		return fmt.Errorf("ошибка создания GCM: %v", err)
+	}
+
+	// Используем потоковое шифрование GCM
+	tag, err := gcm.EncryptStream(reader, writer, nonce, config.AAD)
+	if err != nil {
+		return fmt.Errorf("ошибка потокового шифрования GCM: %v", err)
+	}
+
+	fmt.Printf("GCM потоковое шифрование завершено. Тег: %s\n", hex.EncodeToString(tag))
+	if len(config.AAD) > 0 {
+		fmt.Printf("AAD used: %s\n", hex.EncodeToString(config.AAD))
+	}
+
+	return nil
+}
+
+func executeRegularEncryptionWithIV(config *Config, plaintext []byte) error {
 	if config.Key == nil {
 		generatedKey, err := csprng.GenerateRandomBytes(16)
 		if err != nil {
 			return fmt.Errorf("ошибка генерации ключа: %v", err)
 		}
 		config.Key = generatedKey
-
 		fmt.Printf("Сгенерированный ключ: %s\n", hex.EncodeToString(config.Key))
 	}
 
+	// Используем указанный IV или генерируем новый
+	var iv []byte
+	if config.IV != nil {
+		iv = config.IV
+		fmt.Printf("Используется указанный IV: %s\n", hex.EncodeToString(iv))
+	} else {
+		if config.Mode != "ecb" {
+			var err error
+			if config.Mode == "gcm" {
+				iv, err = generateRandomNonce()
+			} else {
+				iv, err = generateRandomIV()
+			}
+			if err != nil {
+				return fmt.Errorf("ошибка генерации IV: %v", err)
+			}
+		}
+	}
+
+	// Выполняем шифрование в зависимости от режима
 	switch config.Mode {
 	case "ecb":
 		ciphertext, err := modes.ECBEncrypt(plaintext, config.Key)
@@ -145,9 +296,8 @@ func executeRegularEncryption(config *Config, plaintext []byte) error {
 		return WriteOutputFile(config.OutputFile, ciphertext)
 
 	case "cbc":
-		iv, err := generateRandomIV()
-		if err != nil {
-			return fmt.Errorf("ошибка генерации IV для CBC: %v", err)
+		if len(iv) != 16 {
+			return fmt.Errorf("некорректная длина IV для CBC: %d байт (должно быть 16 байт)", len(iv))
 		}
 		ciphertext, err := modes.CBCEncryptWithIV(plaintext, config.Key, iv)
 		if err != nil {
@@ -156,9 +306,8 @@ func executeRegularEncryption(config *Config, plaintext []byte) error {
 		return writeEncryptionOutput(config, ciphertext, iv)
 
 	case "cfb":
-		iv, err := generateRandomIV()
-		if err != nil {
-			return fmt.Errorf("ошибка генерации IV для CFB: %v", err)
+		if len(iv) != 16 {
+			return fmt.Errorf("некорректная длина IV для CFB: %d байт (должно быть 16 байт)", len(iv))
 		}
 		ciphertext, err := modes.CFBEncryptWithIV(plaintext, config.Key, iv)
 		if err != nil {
@@ -167,9 +316,8 @@ func executeRegularEncryption(config *Config, plaintext []byte) error {
 		return writeEncryptionOutput(config, ciphertext, iv)
 
 	case "ofb":
-		iv, err := generateRandomIV()
-		if err != nil {
-			return fmt.Errorf("ошибка генерации IV для OFB: %v", err)
+		if len(iv) != 16 {
+			return fmt.Errorf("некорректная длина IV для OFB: %d байт (должно быть 16 байт)", len(iv))
 		}
 		ciphertext, err := modes.OFBEncryptWithIV(plaintext, config.Key, iv)
 		if err != nil {
@@ -178,9 +326,8 @@ func executeRegularEncryption(config *Config, plaintext []byte) error {
 		return writeEncryptionOutput(config, ciphertext, iv)
 
 	case "ctr":
-		iv, err := generateRandomIV()
-		if err != nil {
-			return fmt.Errorf("ошибка генерации IV для CTR: %v", err)
+		if len(iv) != 16 {
+			return fmt.Errorf("некорректная длина IV для CTR: %d байт (должно быть 16 байт)", len(iv))
 		}
 		ciphertext, err := modes.CTREncryptWithIV(plaintext, config.Key, iv)
 		if err != nil {
@@ -269,15 +416,113 @@ func executeGCMEncryption(config *Config, plaintext []byte) error {
 }
 
 func executeDecryption(config *Config) error {
-	if config.UseAEAD && config.Mode == "gcm" {
-		return executeGCMDecryption(config)
+	// Проверяем размер файла
+	fileInfo, err := os.Stat(config.InputFile)
+	if err != nil {
+		return &FileIOError{
+			Operation: "получение размера файла",
+			Path:      config.InputFile,
+			Err:       err,
+		}
 	}
 
+	fileSize := fileInfo.Size()
+	const memoryThreshold int64 = 100 * 1024 * 1024 // 100MB порог
+
+	if fileSize > memoryThreshold {
+		// Используем потоковую обработку для больших файлов
+		return executeStreamDecryption(config)
+	} else {
+		// Используем обычную обработку для маленьких файлов
+		if config.UseAEAD && config.Mode == "gcm" {
+			return executeGCMDecryption(config)
+		}
+
+		if config.UseETM {
+			return executeETMDecryption(config)
+		}
+
+		return executeRegularDecryption(config)
+	}
+}
+
+func executeStreamDecryption(config *Config) error {
+	// Открываем файлы для потоковой обработки
+	inputReader, err := ReadInputFileStream(config.InputFile)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closer, ok := inputReader.(io.Closer); ok {
+			closer.Close()
+		}
+	}()
+
+	outputWriter, err := WriteOutputFileStream(config.OutputFile)
+	if err != nil {
+		return err
+	}
+	defer func() {
+		if closer, ok := outputWriter.(io.Closer); ok {
+			closer.Close()
+		}
+	}()
+
+	// Для GCM используем специальную потоковую обработку
+	if config.Mode == "gcm" {
+		return executeStreamGCMDecryption(config, inputReader, outputWriter)
+	}
+
+	// Для ETM пока не поддерживаем потоковую обработку
 	if config.UseETM {
-		return executeETMDecryption(config)
+		return fmt.Errorf("потоковая обработка для Encrypt-then-MAC пока не поддерживается для больших файлов")
 	}
 
-	return executeRegularDecryption(config)
+	// Для обычных режимов (CBC, CTR, CFB, OFB)
+	// Получаем IV либо из аргумента, либо читаем из файла
+	var iv []byte
+	if config.IV != nil {
+		iv = config.IV
+		fmt.Printf("Используется указанный IV: %s\n", hex.EncodeToString(iv))
+	} else if config.Mode != "ecb" {
+		// Читаем IV из начала файла
+		ivBuffer := make([]byte, 16)
+		n, err := io.ReadFull(inputReader, ivBuffer)
+		if err != nil {
+			return &FileIOError{
+				Operation: "чтение IV из файла",
+				Path:      config.InputFile,
+				Err:       err,
+			}
+		}
+		if n != 16 {
+			return fmt.Errorf("не удалось прочитать полный IV из файла (получено %d байт)", n)
+		}
+		iv = ivBuffer
+		fmt.Printf("Прочитан IV из файла: %s\n", hex.EncodeToString(iv))
+	}
+
+	// Выполняем потоковое дешифрование для обычных режимов
+	if err := modes.StreamDecrypt(inputReader, outputWriter, config.Key, config.Mode, iv); err != nil {
+		return fmt.Errorf("ошибка потокового дешифрования: %v", err)
+	}
+
+	return nil
+}
+
+func executeStreamGCMDecryption(config *Config, reader io.Reader, writer io.Writer) error {
+	gcm, err := aead.NewGCM(config.Key)
+	if err != nil {
+		return fmt.Errorf("ошибка создания GCM: %v", err)
+	}
+
+	// Используем потоковое дешифрование GCM
+	if err := gcm.DecryptStream(reader, writer, config.IV, config.AAD); err != nil {
+		return fmt.Errorf("ошибка потокового дешифрования GCM: %v", err)
+	}
+
+	fmt.Println("GCM потоковое дешифрование завершено успешно")
+	return nil
 }
 
 func executeRegularDecryption(config *Config) error {
@@ -552,10 +797,97 @@ func readExpectedHMAC(filename string) ([]byte, error) {
 	return hex.DecodeString(hmacHex)
 }
 
-func ReadEncryptedFileWithIV(filePath string) ([]byte, []byte, error) {
-	data, err := ReadInputFile(filePath)
+// ReadInputFileStream открывает файл для потокового чтения
+func ReadInputFileStream(inputPath string) (io.Reader, error) {
+	file, err := os.Open(inputPath)
 	if err != nil {
-		return nil, nil, err
+		if os.IsNotExist(err) {
+			return nil, &FileIOError{
+				Operation: "проверка существования",
+				Path:      inputPath,
+				Err:       fmt.Errorf("файл не существует"),
+			}
+		}
+		return nil, &FileIOError{
+			Operation: "доступ",
+			Path:      inputPath,
+			Err:       err,
+		}
+	}
+
+	fileInfo, err := file.Stat()
+	if err != nil {
+		file.Close()
+		return nil, &FileIOError{
+			Operation: "получение информации",
+			Path:      inputPath,
+			Err:       err,
+		}
+	}
+
+	if fileInfo.IsDir() {
+		file.Close()
+		return nil, &FileIOError{
+			Operation: "чтение",
+			Path:      inputPath,
+			Err:       fmt.Errorf("это директория, а не файл"),
+		}
+	}
+
+	return file, nil
+}
+
+// WriteOutputFileStream создает файл для потоковой записи
+func WriteOutputFileStream(outputPath string) (io.Writer, error) {
+	outputDir := filepath.Dir(outputPath)
+	if outputDir != "." && outputDir != "" {
+		dirInfo, err := os.Stat(outputDir)
+		if err != nil {
+			if os.IsNotExist(err) {
+				if err := os.MkdirAll(outputDir, 0755); err != nil {
+					return nil, &FileIOError{
+						Operation: "создание директории",
+						Path:      outputDir,
+						Err:       err,
+					}
+				}
+			} else {
+				return nil, &FileIOError{
+					Operation: "доступ к директории",
+					Path:      outputDir,
+					Err:       err,
+				}
+			}
+		} else if !dirInfo.IsDir() {
+			return nil, &FileIOError{
+				Operation: "запись",
+				Path:      outputPath,
+				Err:       fmt.Errorf("путь содержит файл вместо директории: %s", outputDir),
+			}
+		}
+	}
+
+	file, err := os.Create(outputPath)
+	if err != nil {
+		return nil, &FileIOError{
+			Operation: "создание файла",
+			Path:      outputPath,
+			Err:       err,
+		}
+	}
+
+	return file, nil
+}
+
+// Чтение файла с IV в начале (для режимов кроме ECB)
+func ReadEncryptedFileWithIV(filePath string) ([]byte, []byte, error) {
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		return nil, nil, &FileIOError{
+			Operation: "чтение",
+			Path:      filePath,
+			Err:       err,
+		}
 	}
 
 	if len(data) < 16 {
@@ -572,10 +904,15 @@ func ReadEncryptedFileWithIV(filePath string) ([]byte, []byte, error) {
 	return ciphertext, iv, nil
 }
 
+// Чтение файла с GCM (nonce в начале, tag в конце)
 func ReadEncryptedFileWithNonce(filePath string) ([]byte, []byte, []byte, error) {
-	data, err := ReadInputFile(filePath)
+	data, err := os.ReadFile(filePath)
 	if err != nil {
-		return nil, nil, nil, err
+		return nil, nil, nil, &FileIOError{
+			Operation: "чтение",
+			Path:      filePath,
+			Err:       err,
+		}
 	}
 
 	if len(data) < 28 {
@@ -593,6 +930,7 @@ func ReadEncryptedFileWithNonce(filePath string) ([]byte, []byte, []byte, error)
 	return ciphertext, nonce, tag, nil
 }
 
+// ReadInputFile читает весь файл в память
 func ReadInputFile(inputPath string) ([]byte, error) {
 	fileInfo, err := os.Stat(inputPath)
 	if err != nil {

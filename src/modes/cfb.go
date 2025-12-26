@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"errors"
+	"io"
 )
 
 func CFBEncryptWithIV(plaintext, key, iv []byte) ([]byte, error) {
@@ -108,4 +109,78 @@ func (x *cfbDecrypter) XORKeyStream(dst, src []byte) {
 		x.iv[aes.BlockSize-1] = ciphertextByte
 		x.pos++
 	}
+}
+
+// Потоковое CFB шифрование
+func streamCFBEncrypt(reader io.Reader, writer io.Writer, block cipher.Block, iv []byte) error {
+	if len(iv) != aes.BlockSize {
+		return errors.New("некорректная длина IV")
+	}
+
+	encrypter := &cfbEncrypter{
+		block:     block,
+		iv:        make([]byte, len(iv)),
+		keystream: make([]byte, aes.BlockSize),
+		pos:       aes.BlockSize,
+	}
+	copy(encrypter.iv, iv)
+
+	buffer := make([]byte, 8192)
+	outputBuffer := make([]byte, 8192)
+
+	for {
+		n, err := reader.Read(buffer)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		if n > 0 {
+			encrypter.XORKeyStream(outputBuffer[:n], buffer[:n])
+			if _, err := writer.Write(outputBuffer[:n]); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// Потоковое CFB дешифрование
+func streamCFBDecrypt(reader io.Reader, writer io.Writer, block cipher.Block, iv []byte) error {
+	if len(iv) != aes.BlockSize {
+		return errors.New("некорректная длина IV")
+	}
+
+	decrypter := &cfbDecrypter{
+		block:     block,
+		iv:        make([]byte, len(iv)),
+		keystream: make([]byte, aes.BlockSize),
+		pos:       aes.BlockSize,
+	}
+	copy(decrypter.iv, iv)
+
+	buffer := make([]byte, 8192)
+	outputBuffer := make([]byte, 8192)
+
+	for {
+		n, err := reader.Read(buffer)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		if n > 0 {
+			decrypter.XORKeyStream(outputBuffer[:n], buffer[:n])
+			if _, err := writer.Write(outputBuffer[:n]); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }

@@ -4,6 +4,7 @@ import (
 	"crypto/aes"
 	"crypto/cipher"
 	"errors"
+	"io"
 )
 
 type ctr struct {
@@ -90,4 +91,66 @@ func CTRDecrypt(ciphertext, key, iv []byte) ([]byte, error) {
 	mode.XORKeyStream(plaintext, ciphertext)
 
 	return plaintext, nil
+}
+
+// Потоковое CTR шифрование
+func streamCTREncrypt(reader io.Reader, writer io.Writer, block cipher.Block, iv []byte) error {
+	if len(iv) != aes.BlockSize {
+		return errors.New("некорректная длина IV")
+	}
+
+	stream := newCTR(block, iv)
+
+	buffer := make([]byte, 8192)
+	outputBuffer := make([]byte, 8192)
+
+	for {
+		n, err := reader.Read(buffer)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		if n > 0 {
+			stream.XORKeyStream(outputBuffer[:n], buffer[:n])
+			if _, err := writer.Write(outputBuffer[:n]); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
+// Потоковое CTR дешифрование
+func streamCTRDecrypt(reader io.Reader, writer io.Writer, block cipher.Block, iv []byte) error {
+	if len(iv) != aes.BlockSize {
+		return errors.New("некорректная длина IV")
+	}
+
+	stream := newCTR(block, iv)
+
+	buffer := make([]byte, 8192)
+	outputBuffer := make([]byte, 8192)
+
+	for {
+		n, err := reader.Read(buffer)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return err
+		}
+
+		if n > 0 {
+			stream.XORKeyStream(outputBuffer[:n], buffer[:n])
+			if _, err := writer.Write(outputBuffer[:n]); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
 }

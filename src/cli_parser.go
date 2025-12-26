@@ -185,7 +185,7 @@ func parseCryptoCommand(args []string) (*Config, error) {
 	flagSet.StringVar(&config.KeyStr, "key", "", "Ключ шифрования в hex-формате (опционально для шифрования)")
 	flagSet.StringVar(&config.InputFile, "input", "", "Путь к входному файлу")
 	flagSet.StringVar(&config.OutputFile, "output", "", "Путь к выходному файлу")
-	flagSet.StringVar(&config.IVStr, "iv", "", "Вектор инициализации в hex-формате (для дешифрования)")
+	flagSet.StringVar(&config.IVStr, "iv", "", "Вектор инициализации в hex-формате (можно указывать при шифровании и дешифровании)")
 	flagSet.StringVar(&config.AADStr, "aad", "", "Дополнительные аутентифицированные данные в hex-формате (для AEAD режимов)")
 
 	if err := flagSet.Parse(args); err != nil {
@@ -438,62 +438,56 @@ func validateCryptoConfig(config *Config) error {
 }
 
 func validateIVLogic(config *Config) error {
-	if config.Encrypt {
-		if config.Mode == "gcm" {
-			if config.IVStr != "" {
-				iv, err := hex.DecodeString(config.IVStr)
-				if err != nil {
-					return fmt.Errorf("некорректный формат IV/nonce: %v (должен быть hex-строка)", err)
-				}
-
-				if len(iv) != 12 {
-					return fmt.Errorf("некорректная длина nonce для GCM: %d байт (должно быть 12 байт)", len(iv))
-				}
-
-				config.IV = iv
-				fmt.Fprintf(os.Stderr, "Используется указанный nonce: %s\n", config.IVStr)
-			} else {
-				fmt.Fprintf(os.Stderr, "Nonce не указан, будет сгенерирован случайный 12-байтный nonce\n")
-			}
-		} else if config.IVStr != "" {
-			fmt.Fprintf(os.Stderr, "Предупреждение: --iv игнорируется при шифровании (IV генерируется автоматически)\n")
+	// IV можно указывать как при шифровании, так и при дешифровании
+	if config.IVStr != "" {
+		iv, err := hex.DecodeString(config.IVStr)
+		if err != nil {
+			return fmt.Errorf("некорректный формат IV: %v (должен быть hex-строка)", err)
 		}
-	} else if config.Decrypt {
-		if config.Mode == "ecb" {
-			if config.IVStr != "" {
-				fmt.Fprintf(os.Stderr, "Предупреждение: --iv игнорируется для режима ECB\n")
+
+		// Проверяем длину IV в зависимости от режима
+		if config.Mode == "gcm" {
+			if len(iv) != 12 {
+				return fmt.Errorf("некорректная длина nonce для GCM: %d байт (должно быть 12 байт)", len(iv))
 			}
-		} else if config.Mode == "gcm" {
-			if config.IVStr != "" {
-				iv, err := hex.DecodeString(config.IVStr)
-				if err != nil {
-					return fmt.Errorf("некорректный формат IV/nonce: %v (должен быть hex-строка)", err)
-				}
-
-				if len(iv) != 12 {
-					return fmt.Errorf("некорректная длина nonce для GCM: %d байт (должно быть 12 байт)", len(iv))
-				}
-
-				config.IV = iv
-				fmt.Fprintf(os.Stderr, "Используется указанный nonce\n")
+			if config.Encrypt {
+				fmt.Fprintf(os.Stderr, "Используется указанный nonce для шифрования: %s\n", config.IVStr)
 			} else {
-				fmt.Fprintf(os.Stderr, "Nonce не указан, будет прочитан из начала файла %s\n", config.InputFile)
+				fmt.Fprintf(os.Stderr, "Используется указанный nonce для дешифрования: %s\n", config.IVStr)
+			}
+		} else if config.Mode != "ecb" {
+			if len(iv) != 16 {
+				return fmt.Errorf("некорректная длина IV для режима %s: %d байт (должно быть 16 байт)", config.Mode, len(iv))
+			}
+			if config.Encrypt {
+				fmt.Fprintf(os.Stderr, "Используется указанный IV для шифрования: %s\n", config.IVStr)
+			} else {
+				fmt.Fprintf(os.Stderr, "Используется указанный IV для дешифрования: %s\n", config.IVStr)
 			}
 		} else {
-			if config.IVStr == "" {
-				fmt.Fprintf(os.Stderr, "IV не указан, будет прочитан из начала файла %s\n", config.InputFile)
+			// ECB не использует IV
+			fmt.Fprintf(os.Stderr, "Предупреждение: --iv игнорируется для режима ECB\n")
+			config.IV = nil
+			return nil
+		}
+
+		config.IV = iv
+	} else {
+		// IV не указан
+		if config.Encrypt {
+			if config.Mode == "gcm" {
+				fmt.Fprintf(os.Stderr, "Nonce не указан, будет сгенерирован случайный 12-байтный nonce\n")
+			} else if config.Mode != "ecb" {
+				fmt.Fprintf(os.Stderr, "IV не указан, будет сгенерирован случайный 16-байтный IV\n")
+			}
+		} else {
+			// При дешифровании
+			if config.Mode == "ecb" {
+				// ECB не использует IV
+			} else if config.Mode == "gcm" {
+				fmt.Fprintf(os.Stderr, "Nonce не указан, будет прочитан из начала файла %s\n", config.InputFile)
 			} else {
-				iv, err := hex.DecodeString(config.IVStr)
-				if err != nil {
-					return fmt.Errorf("некорректный формат IV: %v (должен быть hex-строка)", err)
-				}
-
-				if len(iv) != 16 {
-					return fmt.Errorf("некорректная длина IV: %d байт (должно быть 16 байт)", len(iv))
-				}
-
-				config.IV = iv
-				fmt.Fprintf(os.Stderr, "Используется указанный IV\n")
+				fmt.Fprintf(os.Stderr, "IV не указан, будет прочитан из начала файла %s\n", config.InputFile)
 			}
 		}
 	}
